@@ -1,0 +1,20 @@
+# Build output (rebuild with build.cmd)
+/build/
+*.exe
+*.obj
+*.pdb
+
+# Written by the picker on your PC: your panel size and gear-button choices, and the
+# PICKER_LOG=1 debug log (it lists the apps you switch between)
+/settings.json
+*.log
+
+# Python cache from the old emote_picker.pyw (it records the folder path, with your username)
+__pycache__/
+*.pyc
+
+# Editor and per-user tool settings
+.vs/
+.vscode/
+*.user
+.claude/settings.local.json
