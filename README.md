@@ -15,7 +15,7 @@ build.cmd         builds "7TV Emote Picker.exe"; starting it replaces a copy tha
 build.cmd test    also builds build\render_test.exe, which draws the picker offscreen into PNGs
 ```
 
-Things you might want to change are in `src/config.h`. `emote_picker.pyw` is the original Python version, kept for reference.
+Things you might want to change are in `src/config.h`. How fast a search shows its emotes, and what was measured to make it faster: [docs/search-speed.md](docs/search-speed.md). `emote_picker.pyw` is the original Python version, kept for reference.
 
 ## Versions
 

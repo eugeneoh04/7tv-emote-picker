@@ -194,9 +194,10 @@ struct Tester {
     // Each round: a pause long enough for 7TV to close idle connections (its CDN after 30 s, its
     // search server after 50 s), then a search; a second search typed 1.5 s after another one's
     // results came in (while that one's previews still load); then the first search again.
-    // The panel as the user had it on 2026-11-24: 577x569 at 175%, the size slider at 240%
-    // (154px emotes from 4x previews), pasting "auto" gif files (so the files in view download
-    // too). Downloads several MB a round: not while a game is being played on this PC.
+    // The panel the results in docs/search-speed.md were measured with: 577x569 at 175%, the
+    // size slider at 240% (154px emotes from 4x previews), pasting "auto" gif files (so the files
+    // in view download too). Downloads several MB a round, slowing anything else on the
+    // connection meanwhile.
     void search_speed(int rounds, double pause_s) {
         own_uploads();
         std::error_code ec;
@@ -229,20 +230,29 @@ struct Tester {
             settle();
         }
         const wchar_t* names[] = {L"after a pause", L"during another", L"again"};
-        wprintf(L"Medians over %d rounds (ms after the last letter):\n", rounds);
+        wprintf(L"Medians over %d rounds (ms after the last letter; >30000: not all done within 30 s):\n", rounds);
+        // The middle value (the mean of the middle two for an even count). A round that didn't
+        // finish within 30 s counts as longer than any that did.
+        auto median = [](std::vector<double> v) {
+            for (double& x : v) x = x < 0 ? INFINITY : x;
+            std::sort(v.begin(), v.end());
+            size_t n = v.size();
+            return n == 0 ? NAN : n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
+        };
+        auto ms = [](double v) {
+            return std::isnan(v) ? std::wstring(L"    -") : std::isinf(v) ? std::wstring(L">30000") : std::to_wstring((int)std::lround(v));
+        };
         for (int k = 0; k < 3; k++) {
-            auto median = [&](double Phase::*field) {
+            auto of = [&](double Phase::*field) {
                 std::vector<double> v;
                 for (auto& p : phases[k]) v.push_back(p.*field);
-                std::sort(v.begin(), v.end());
-                return v.empty() ? -1.0 : v[v.size() / 2];
+                return ms(median(v));
             };
             std::vector<double> mb;
             for (auto& p : phases[k]) mb.push_back(p.net.bytes / 1048576.0);
-            std::sort(mb.begin(), mb.end());
-            wprintf(L"  %-16ls results %5.0f, first still %5.0f, all stills %5.0f, all moving %5.0f; %.1f MB\n", names[k],
-                    median(&Phase::results), median(&Phase::first), median(&Phase::stills), median(&Phase::anims),
-                    mb.empty() ? 0.0 : mb[mb.size() / 2]);
+            wprintf(L"  %-16ls results %5ls, first still %5ls, all stills %5ls, all moving %6ls; %.1f MB\n", names[k],
+                    of(&Phase::results).c_str(), of(&Phase::first).c_str(), of(&Phase::stills).c_str(),
+                    of(&Phase::anims).c_str(), mb.empty() ? 0.0 : median(mb));
         }
     }
 
