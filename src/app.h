@@ -133,6 +133,8 @@ private:
     void paste_items(const ClipItems& items, HWND window);
     void bring_forward(HWND window);
     void send_ctrl_v();
+    void wait_for_paste();
+    void render_lent(UINT format);
     void restore_clipboard();
     std::wstring file_for(const Emote& e) const;
     void warm_connections(bool search = true);
@@ -324,6 +326,7 @@ private:
     FILE* log_file = nullptr;      // see note()
     HWND noted_fg = (HWND)-1;
     std::optional<ClipItems> clip_saved;  // what you had copied, while a link borrows it
+    ClipItems lent;                // the link (or file) on the clipboard, handed over when read
     DWORD clip_seq = 0;
     bool borrowing = false;        // a link is on the clipboard and the copy isn't back yet
 

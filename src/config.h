@@ -41,9 +41,13 @@ inline constexpr bool ADD_SPACE_AFTER = false;  // append a space after the past
 // After clicking an emote while you were typing in the picker, give Discord this long to
 // take focus back before pasting. (Clicking while Discord has focus pastes right away.)
 inline constexpr int PASTE_DELAY_MS = 250;
-// This long after pasting, whatever you had copied before (from Chrome etc.) goes back on
-// the clipboard. Raise it if Discord ever pastes that instead of the emote.
+// This long after Discord reads the paste, whatever you had copied before (from Chrome etc.)
+// goes back on the clipboard; if nothing reads it, after RESTORE_CLIPBOARD_MAX_MS. Raise them
+// if Discord ever pastes that instead of the emote. (Counting from the paste wasn't enough:
+// with a screenshot copied, Discord read the clipboard after the screenshot was already back,
+// and found it as an empty file.)
 inline constexpr int RESTORE_CLIPBOARD_MS = 1000;
+inline constexpr int RESTORE_CLIPBOARD_MAX_MS = 5000;
 inline constexpr int PER_PAGE = 250;          // emotes per search (7TV allows at most 250)
 // How big emotes show, at 100% display scaling. The nearest of 7TV's preview sizes is used
 // (32/64/96/128px, e.g. 64px at 175%), and each row fits as many emotes as it has room for.

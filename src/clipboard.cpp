@@ -42,6 +42,19 @@ const ClipItems& hide_from_history() {
     return marks;
 }
 
+// Puts one format on the clipboard (which the caller has open, or is rendering for).
+bool put(UINT format, const Bytes& data) {
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, std::max<size_t>(1, data.size()));
+    if (!h) return false;
+    if (void* p = GlobalLock(h)) {
+        if (!data.empty()) memcpy(p, data.data(), data.size());
+        GlobalUnlock(h);
+    }
+    if (SetClipboardData(format, h)) return true;
+    GlobalFree(h);
+    return false;
+}
+
 }  // namespace
 
 std::optional<ClipItems> clipboard_snapshot(HWND owner) {
@@ -58,6 +71,16 @@ std::optional<ClipItems> clipboard_snapshot(HWND owner) {
         }
     }
     CloseClipboard();
+    // A "virtual file" (a screenshot from the Snipping Tool, say) is its description
+    // (FileGroupDescriptor) plus contents that stay in the program that copied it (FileContents,
+    // not a block of memory, so it can't be saved). Put back without them, it pastes as an empty
+    // file: Discord says "File cannot be empty". Leave the description out too; the rest (the
+    // picture itself, a path to its file) still pastes.
+    UINT contents = RegisterClipboardFormatW(L"FileContents");
+    if (std::none_of(saved.begin(), saved.end(), [&](const auto& item) { return item.first == contents; })) {
+        UINT a = RegisterClipboardFormatW(L"FileGroupDescriptorW"), b = RegisterClipboardFormatW(L"FileGroupDescriptor");
+        std::erase_if(saved, [&](const auto& item) { return item.first == a || item.first == b; });
+    }
     return saved;
 }
 
@@ -71,17 +94,24 @@ std::optional<DWORD> clipboard_set(HWND owner, const ClipItems& items, bool hidd
             for (auto& [f, d] : items) have |= f == mark.first;
             if (!have) all.push_back(mark);
         }
-    for (auto& [f, data] : all) {
-        HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, std::max<size_t>(1, data.size()));
-        if (!h) continue;
-        if (void* p = GlobalLock(h)) {
-            if (!data.empty()) memcpy(p, data.data(), data.size());
-            GlobalUnlock(h);
-        }
-        if (!SetClipboardData(f, h)) GlobalFree(h);
-    }
+    for (auto& [f, data] : all) put(f, data);
     CloseClipboard();
     return GetClipboardSequenceNumber();
+}
+
+std::optional<DWORD> clipboard_lend(HWND owner, const ClipItems& items) {
+    if (!open_clipboard(owner)) return std::nullopt;
+    EmptyClipboard();
+    for (auto& [f, data] : items) SetClipboardData(f, nullptr);  // handed over when asked for
+    for (auto& [f, data] : hide_from_history()) put(f, data);   // these at once: monitors check them
+    CloseClipboard();
+    return GetClipboardSequenceNumber();
+}
+
+bool clipboard_render(UINT format, const ClipItems& items) {
+    for (auto& [f, data] : items)
+        if (f == format) return put(f, data);
+    return false;
 }
 
 ClipItems clipboard_text(std::wstring_view text) {

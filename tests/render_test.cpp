@@ -4,6 +4,7 @@
 //   render_test.exe <out dir> --auto-size N   (file mode's "auto" size on N animated emotes)
 //   render_test.exe <out dir> --search-speed [ROUNDS] [--pause SECONDS]   (see search_speed)
 //   render_test.exe <out dir> --webp N   (WebP previews decoded, for checking against ffmpeg)
+//   render_test.exe <out dir> --clipboard-only   (the clipboard borrow checks, nothing else)
 // Draws the picker at 1451x341 (829x195 at 175%) into PNGs while driving it like a user,
 // writes decoded GIF frames for comparison with the Python version's decoder, measures CPU
 // use while emotes animate, and with --clipboard checks the clipboard borrow round trip.
@@ -1230,6 +1231,78 @@ struct Tester {
         if (before2) clipboard_set(app.hwnd, *before2, true);
         wprintf(L"  file on clipboard: %ls, as a copy: %ls, put back: %ls\n", got == path ? L"yes" : got.c_str(),
                 effect == DROPEFFECT_COPY ? L"yes" : L"NO", before2 ? L"yes" : L"NO");
+        lend_checks();
+    }
+
+    // Every format in `before` is in `after`, byte for byte (Windows may round sizes up).
+    static bool same_clip(const ClipItems& before, const ClipItems& after) {
+        for (auto& [f1, d1] : before) {
+            bool found = false;
+            for (auto& [f2, d2] : after)
+                if (f1 == f2) found = d1.size() <= d2.size() && std::equal(d1.begin(), d1.end(), d2.begin());
+            if (!found) return false;
+        }
+        return true;
+    }
+
+    // The link lent the way paste_items does it (without pressing Ctrl+V anywhere): read only
+    // after 1.5 s (with a screenshot copied, Discord got to a paste after the old fixed 1 s, and
+    // found the screenshot back already), then never read at all; and a screenshot-like virtual
+    // file without its contents. Puts back what you had copied, unless you copy something meanwhile.
+    void lend_checks() {
+        auto mine = clipboard_snapshot(app.hwnd);
+        if (!mine) {
+            wprintf(L"  clipboard busy\n");
+            return;
+        }
+        const std::wstring url = L"https://cdn.7tv.app/emote/test/4x.webp";
+        auto lend = [&] {
+            ClipItems link = clipboard_text(url);
+            auto seq = clipboard_lend(app.hwnd, link);
+            app.clip_saved = mine;
+            app.lent = link;
+            app.clip_seq = seq.value_or(0);
+            app.borrowing = seq.has_value();
+            app.wait_for_paste();
+            return seq.has_value();
+        };
+        DWORD last = 0;
+        if (lend()) {
+            double t0 = now_ms();
+            pump_for(1500);
+            bool waiting = app.borrowing;
+            std::wstring read = clipboard_get_text(app.hwnd);  // the late reader
+            double read_at = now_ms() - t0;
+            while (app.borrowing && now_ms() - t0 < 10000) app.pump(10);
+            double back = now_ms() - t0 - read_at;
+            auto after = clipboard_snapshot(app.hwnd);
+            last = GetClipboardSequenceNumber();
+            wprintf(L"  link read after %.0f ms: still there: %ls; your copy back %.0f ms after that, identical: %ls\n",
+                    read_at, waiting && read == url ? L"yes" : L"NO", back, after && same_clip(*mine, *after) ? L"yes" : L"NO");
+        }
+        if (lend()) {
+            double t0 = now_ms();
+            while (app.borrowing && now_ms() - t0 < 10000) app.pump(10);
+            auto after = clipboard_snapshot(app.hwnd);
+            last = GetClipboardSequenceNumber();
+            wprintf(L"  link never read: your copy back after %.0f ms (RESTORE_CLIPBOARD_MAX_MS %d), identical: %ls\n",
+                    now_ms() - t0, RESTORE_CLIPBOARD_MAX_MS, after && same_clip(*mine, *after) ? L"yes" : L"NO");
+        }
+        // One FILEDESCRIPTORW (592 bytes after the count) and some text; no FileContents.
+        UINT fgd = RegisterClipboardFormatW(L"FileGroupDescriptorW");
+        ClipItems fake = clipboard_text(L"screenshot stand-in");
+        fake.push_back({fgd, Bytes(4 + 592, 0)});
+        fake.back().second[0] = 1;
+        auto fake_seq = clipboard_set(app.hwnd, fake, true);
+        auto snap = clipboard_snapshot(app.hwnd);
+        bool dropped = snap && std::none_of(snap->begin(), snap->end(), [&](const auto& i) { return i.first == fgd; });
+        bool text_kept = snap && std::any_of(snap->begin(), snap->end(), [](const auto& i) { return i.first == CF_UNICODETEXT; });
+        wprintf(L"  virtual file without its contents: left out of the copy: %ls, the rest kept: %ls\n",
+                dropped ? L"yes" : L"NO", text_kept ? L"yes" : L"NO");
+        (void)last;
+        bool untouched = fake_seq && GetClipboardSequenceNumber() == *fake_seq;  // nothing copied since
+        if (untouched) clipboard_set(app.hwnd, *mine, true);
+        wprintf(L"  what you had copied put back: %ls\n", untouched ? L"yes" : L"no (something new was copied)");
     }
 };
 
@@ -1312,6 +1385,12 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--gifs" && i + 1 < argc) gifs = _wtoi(argv[++i]);
         else if (a == L"--cpu" && i + 1 < argc) cpu_s = _wtof(argv[++i]);
     }
+    for (int i = 2; i < argc; i++)
+        if (std::wstring(argv[i]) == L"--clipboard-only") {  // the clipboard borrow checks alone
+            t.clipboard();
+            fflush(stdout);
+            ExitProcess(0);
+        }
     if (GetEnvironmentVariableW(L"BITMAPS", nullptr, 0)) {
         t.bitmaps();
         fflush(stdout);

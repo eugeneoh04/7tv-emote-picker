@@ -459,6 +459,18 @@ LRESULT App::handle(UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case WM_DPICHANGED:
             return 0;  // the panel follows Discord's scaling and position, not its own
+        case WM_RENDERFORMAT:  // a program reads what the clipboard was lent (clipboard_lend)
+            render_lent((UINT)wp);
+            return 0;
+        case WM_RENDERALLFORMATS:  // quitting while the clipboard is lent and not read yet
+            if (borrowing) {
+                restore_clipboard();  // your copy back now
+            } else if (OpenClipboard(hwnd)) {
+                if (GetClipboardOwner() == hwnd)
+                    for (auto& [format, data] : lent) clipboard_render(format, lent);
+                CloseClipboard();
+            }
+            return 0;
         case WM_CLOSE:
             DestroyWindow(hwnd);
             return 0;
@@ -602,13 +614,16 @@ void App::paste_items(const ClipItems& data, HWND window) {
         return;
     }
     // Save what you had copied, then lend the clipboard to the link. If an earlier paste is
-    // still borrowing it, keep that one's saved copy: it's the one to put back.
+    // still borrowing it, keep that one's saved copy: it's the one to put back. The link is
+    // handed over when Discord reads it (render_lent), so that's when the copy's time to come
+    // back starts.
     if (!borrowing) clip_saved = clipboard_snapshot(hwnd);
-    auto seq = clipboard_set(hwnd, data, true);
+    auto seq = clipboard_lend(hwnd, data);
     if (!seq) {
         flash(L"Clipboard busy, click again");
         return;
     }
+    lent = data;
     clip_seq = *seq;
     borrowing = true;
     KillTimer(hwnd, timer::restore);
@@ -753,7 +768,19 @@ void App::send_ctrl_v() {
     add_key(keys, 'V', true);
     add_key(keys, VK_CONTROL, true);
     SendInput((UINT)keys.size(), keys.data(), sizeof(INPUT));
-    SetTimer(hwnd, timer::restore, RESTORE_CLIPBOARD_MS, nullptr);
+    wait_for_paste();
+}
+
+// The paste is under way: your copy comes back RESTORE_CLIPBOARD_MS after Discord reads the
+// link (render_lent), or after RESTORE_CLIPBOARD_MAX_MS if nothing does.
+void App::wait_for_paste() { SetTimer(hwnd, timer::restore, RESTORE_CLIPBOARD_MAX_MS, nullptr); }
+
+// A program (Discord, pasting) asks for what the clipboard was lent: hand it over, and put your
+// copy back a moment after that.
+void App::render_lent(UINT format) {
+    if (!clipboard_render(format, lent)) return;
+    clip_seq = GetClipboardSequenceNumber();  // (if handing it over counts as a change, it's ours)
+    if (borrowing) SetTimer(hwnd, timer::restore, RESTORE_CLIPBOARD_MS, nullptr);
 }
 
 // Put back what you had copied before the paste, unless you've copied something new since.
@@ -767,6 +794,7 @@ void App::restore_clipboard() {
         }
     }
     clip_saved.reset();
+    lent.clear();
     borrowing = false;
 }
 
