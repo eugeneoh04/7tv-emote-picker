@@ -1,4 +1,5 @@
-// Decoding previews with Windows' own image decoders (WIC). Runs in the download threads.
+// Decoding previews: WebP with libwebp (third_party/libwebp; Windows can't read WebP
+// everywhere), PNG and GIF with Windows' own image decoders (WIC). Runs in the download threads.
 // Pictures are scaled (high quality) to show `height` pixels tall, but never wider or taller
 // than room x room; 0 means as-is / no limit.
 #pragma once
@@ -12,7 +13,10 @@ struct Image {
     std::vector<uint32_t> px;
 };
 
-// A still preview (PNG).
+// False for a WebP that can't be read (anything else: true; whether it decodes shows later).
+bool image_readable(const Bytes& data);
+
+// A still preview (WebP or PNG; a WebP that moves gives its first frame).
 bool decode_still(const Bytes& data, int height, int room, Image& out);
 
 // An animated GIF: all its frames, layered the way the GIF says and scaled, laid out in one
@@ -24,7 +28,9 @@ struct Animation {
     Image atlas;
     std::vector<int> ends;     // when each frame ends, in ms from the start
 };
-// False if it's not a GIF that moves (or it's too big to show).
+// An animated WebP or GIF. False if it doesn't move (or it's too big to show).
+bool decode_animation(const Bytes& data, int height, int room, int max_texture, Animation& out);
+// The same for GIFs only: false if it's not a GIF that moves.
 bool decode_gif(const Bytes& data, int height, int room, int max_texture, Animation& out);
 
 // File mode's "auto" size: a GIF (every frame, with its timing) or PNG made height pixels tall,

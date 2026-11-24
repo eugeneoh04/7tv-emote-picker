@@ -15,8 +15,16 @@ call "%VS%\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1 || exit /b 1
 if not exist build\obj mkdir build\obj
 if not exist build\test mkdir build\test
 
-set CFLAGS=/nologo /std:c++20 /O2 /GL /EHsc /W4 /permissive- /MT /utf-8 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN
-set LIBS=d2d1.lib d3d11.lib dxgi.lib dwrite.lib windowscodecs.lib winhttp.lib dwmapi.lib imm32.lib user32.lib ole32.lib
+set CFLAGS=/nologo /std:c++20 /O2 /GL /EHsc /W4 /permissive- /MT /utf-8 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /Ithird_party\libwebp\src
+set LIBS=build\webp.lib d2d1.lib d3d11.lib dxgi.lib dwrite.lib windowscodecs.lib winhttp.lib dwmapi.lib imm32.lib user32.lib ole32.lib
+
+rem libwebp's decoder (third_party\libwebp, for the WebP previews) is compiled once into
+rem build\webp.lib. Delete that file to compile it again.
+if not exist build\webp.lib (
+  if not exist build\webp mkdir build\webp
+  cl /nologo /c /MP /O2 /MT /W0 /DNDEBUG /D_CRT_SECURE_NO_WARNINGS /DWIN32_LEAN_AND_MEAN /Ithird_party\libwebp /Fobuild\webp\ third_party\libwebp\src\dec\*.c third_party\libwebp\src\demux\*.c third_party\libwebp\src\dsp\*.c third_party\libwebp\src\utils\*.c || exit /b 1
+  lib /nologo /out:build\webp.lib build\webp\*.obj || exit /b 1
+)
 
 rc /nologo /fo build\app.res src\app.rc || exit /b 1
 cl %CFLAGS% /Fobuild\obj\ src\*.cpp build\app.res /Fe:build\picker.exe /link /LTCG /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTINPUT:src\app.manifest %LIBS% || exit /b 1

@@ -250,7 +250,7 @@ bool App::init(bool headless_, int width, int height, double scale, bool follow)
     DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
     files_dir = n && n < MAX_PATH ? std::wstring(local) + L"\\7TV Emote Picker\\uploads\\" : exe_dir() + L"uploads\\";
     if (!headless) std::thread([dir = files_dir] { prune_files(dir); }).detach();
-    warm_files();
+    warm_connections(false);  // (the search for popular emotes, at the end, opens the search's)
     HINSTANCE inst = GetModuleHandleW(nullptr);
     WNDCLASSEXW wc{sizeof(wc)};
     wc.style = CS_DBLCLKS;
@@ -556,7 +556,7 @@ void App::dock() {
         SetWindowPos(hwnd, HWND_TOPMOST, pos.left, pos.top, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         if (showing) {
             request_frame();  // animated emotes move again
-            warm_files();
+            warm_connections();  // a search may come next
         }
     }
 }
@@ -633,11 +633,11 @@ void App::bring_forward(HWND window) {
     }
 }
 
-// File mode: opens the connection files download on before a click needs it (the secure
-// handshake alone takes ~0.6s from here to 7TV).
-void App::warm_files() {
-    if (settings.paste == L"file") net_warm_alone(L"https://cdn.7tv.app/");
-}
+// Opens the connections a search, its previews and (file mode) a click will use, unless
+// they're open: 7TV closes idle ones within a minute, and opening one takes a second or so
+// from here. Called when a search may be coming, so that's done while you type. search false:
+// a search is starting and opens its own.
+void App::warm_connections(bool search) { net_warm_soon(settings.paste == L"file", search); }
 
 // Where emote e's file goes in file mode: a folder for the emote and size ("2x", or "48px" for
 // one resized to that), the file named after the emote (Discord shows that name).
@@ -660,10 +660,15 @@ void App::fetch_file(const Emote& e, bool ahead) {
     }
     downloading.insert(path);
     files_ahead += ahead;
-    std::thread([this, url = emote_link(e, settings), path, ahead, height = file_height(e, settings)] {
+    CancelFlag cancel;  // files fetched ahead stop if a new search doesn't have their emote
+    if (ahead) {
+        cancel = std::make_shared<std::atomic<bool>>(false);
+        ahead_files[path] = {e.id, cancel};
+    }
+    std::thread([this, url = emote_link(e, settings), path, ahead, cancel, height = file_height(e, settings)] {
         FileDone d{path, L"", ahead};
         Bytes data;
-        bool got = ahead ? fetch(url, "", data, d.error) : fetch_alone(url, data, d.error);
+        bool got = ahead ? fetch(url, "", data, d.error, cancel.get()) : fetch_alone(url, data, d.error);
         // The "auto" size: made as tall as Discord's own emotes (left as 7TV made it if that
         // fails, so it still pastes). Below normal priority, like the previews.
         if (got && height) {
@@ -683,11 +688,9 @@ void App::fetch_file(const Emote& e, bool ahead) {
 }
 
 // File mode: the files of the emotes in view [from, to) download too, so clicking one pastes
-// at once. They wait until the stills in view are in (those show what there is to click), and
-// four at a time.
+// at once, four at a time. (load_previews calls this once the stills in view are in: those show
+// what there is to click.)
 void App::fetch_files_in_view(int from, int to) {
-    for (int i = from; i < to; i++)
-        if (fetching.count(key_of(i) + "s")) return;
     for (int i = from; i < to && files_ahead < 4; i++) {
         std::wstring path = file_for(emotes[i]);
         if (!files_here.count(path)) fetch_file(emotes[i], true);
@@ -697,6 +700,7 @@ void App::fetch_files_in_view(int from, int to) {
 void App::file_done(const FileDone& d) {
     downloading.erase(d.path);
     files_ahead -= d.ahead;
+    if (d.ahead) ahead_files.erase(d.path);
     if (d.error.empty()) files_here.insert(d.path);
     if (!pending || pending->path != d.path) return;  // fetched ahead of a click, or not wanted now
     if (!d.error.empty()) {
@@ -784,6 +788,7 @@ void App::flash(const std::wstring& s, UINT ms) {
 
 void App::query_changed() {
     SetTimer(hwnd, timer::search, SEARCH_DELAY_MS, nullptr);  // search once you stop typing
+    warm_connections();
     request_frame();
 }
 
@@ -793,7 +798,7 @@ void App::search_now() {
     std::wstring text = trim(box.text());
     search_text = text;
     say(L"Searching…");
-    warm_files();  // a click usually comes next
+    warm_connections(false);  // previews and (file mode) a click come next
     std::thread([this, gen, text] {
         SearchResult r;
         r.gen = gen;
@@ -811,6 +816,7 @@ void App::show_results(std::vector<Emote> found) {
     // would pile up. Downloads are kept longer, so going back to a search is quick.
     std::unordered_set<std::string> shown;
     for (auto& e : found) shown.insert(e.id);
+    cancel_unshown(shown);
     auto unshown = [&](const auto& entry) { return !shown.count(entry.first.substr(0, entry.first.size() - 2)); };
     std::erase_if(stills, unshown);
     std::erase_if(anims, unshown);
@@ -847,7 +853,7 @@ void App::set_option(const Segment& seg) {
         if (settings.format == L"webp" || settings.format == L"avif") settings.format = L"gif";
     }
     save_settings(settings);
-    warm_files();
+    warm_connections();
     layout();  // the note next to the formats changes
     if (settings.size == L"auto") flash(auto_note(), 4000);
 }

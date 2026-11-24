@@ -49,14 +49,18 @@ struct Box {
     D2D1_RECT_F d2d() const { return {l, t, r, b}; }
 };
 
+// Set when a download is no longer wanted: it stops part-way.
+using CancelFlag = std::shared_ptr<std::atomic<bool>>;
+
 // Work for the download threads, and what comes back.
 struct Job {
-    enum Kind { Still, Gif } kind = Still;
+    enum Kind { Still, Moving } kind = Still;  // Moving: an animated emote's animation
     std::string key, id;  // key: emote id and preview size
     int s = 1;
     bool animated = false;
     SharedBytes bytes;    // set: already downloaded, just decode
     int height = 0, room = 0, max_texture = 4096;  // shown height asked for, room it must fit
+    CancelFlag cancel;
 };
 struct JobResult {
     Job job;
@@ -91,8 +95,7 @@ private:
         int w = 0, h = 0, height = 0, room = 0;  // size, and the height and room it was made for
         bool by_room = false;
     };
-    struct Anim {                 // an animated emote's GIF and, while near the screen, frames
-        SharedBytes gif;
+    struct Anim {                 // an animated emote's animation; its frames while near the screen
         ComPtr<ID2D1Bitmap1> atlas;
         int w = 0, h = 0, count = 0, cols = 1, height = 0, room = 0;
         bool by_room = false;
@@ -132,7 +135,7 @@ private:
     void send_ctrl_v();
     void restore_clipboard();
     std::wstring file_for(const Emote& e) const;
-    void warm_files();
+    void warm_connections(bool search = true);
     void fetch_file(const Emote& e, bool ahead = false);
     void fetch_files_in_view(int from, int to);
     void file_done(const FileDone& d);
@@ -198,10 +201,13 @@ private:
     void worker();
     void drain_results();
     void got_still(JobResult& r);
-    void got_gif(JobResult& r);
+    void got_moving(JobResult& r);
     void load_previews();
     void load_stills(int from, int to);
     void submit(Job job);
+    void done_fetching(const std::string& what, const CancelFlag& cancel);
+    void cancel_unshown(const std::unordered_set<std::string>& shown);
+    void keep_moving_file(const std::string& key, SharedBytes bytes);
     std::pair<int, int> on_screen() const;
     std::string key_of(int i) const;
     Anim* anim_at(int i, bool* exact = nullptr);
@@ -284,10 +290,18 @@ private:
     bool flashing = false;
 
     // previews
-    std::unordered_map<std::string, SharedBytes> raw;              // key -> downloaded PNG
+    std::unordered_map<std::string, SharedBytes> raw;              // key -> downloaded still
     std::unordered_map<std::string, Still> stills;                 // key -> on the GPU
     std::unordered_map<std::string, std::unique_ptr<Anim>> anims;  // null: can't play
-    std::unordered_set<std::string> fetching;  // key + "s" (still) / "g" (gif) in the works
+    struct Kept {
+        SharedBytes bytes;
+        uint64_t used = 0;  // use_tick when last wanted
+    };
+    // key -> downloaded animation, kept when the results change (see keep_moving_file)
+    std::unordered_map<std::string, Kept> moving_files;
+    uint64_t use_tick = 0;
+    // key + "s" (still) / "g" (animation) in the works, and the flag that stops its download
+    std::unordered_map<std::string, CancelFlag> fetching;
     std::unordered_set<std::string> started;   // emote ids whose preview shows or is coming
     std::vector<std::thread> workers;
     std::mutex job_mutex, result_mutex;
@@ -318,6 +332,8 @@ private:
     std::unordered_set<std::wstring> downloading;  // files on their way (paths)
     std::unordered_set<std::wstring> files_here;   // files seen on disk (paths)
     int files_ahead = 0;                           // downloads of files in view, under way
+    // those downloads: path -> emote id, and the flag that stops one no longer in the results
+    std::unordered_map<std::wstring, std::pair<std::string, CancelFlag>> ahead_files;
     std::vector<FileDone> files_done;              // from the download threads (result_mutex)
     std::optional<Pending> pending;
     bool dry_run = false;          // tests: pasting only records what would go on the clipboard

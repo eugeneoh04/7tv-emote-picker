@@ -258,6 +258,7 @@ void App::mouse_down(float x, float y, bool shift, bool double_click) {
                 BOOL ok = SetForegroundWindow(hwnd);
                 note(L"search box clicked: picker to the front %ls", ok ? L"ok" : L"refused");
             }
+            warm_connections();  // a search is coming
             double now = now_ms();
             clicks = double_click ? 2 : clicks == 2 && now - last_click <= GetDoubleClickTime() ? 3 : 1;
             last_click = now;

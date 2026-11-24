@@ -62,22 +62,31 @@ inline constexpr int DOCK_MARGIN_BOTTOM = 80;
 inline constexpr int FOLLOW_POLL_MS = 200;
 inline constexpr bool ANIMATE = true;         // false: animated emotes stay still
 // Previews download for the rows on screen and the next screen down, the rest as you scroll.
-// Previews downloading at once. They all share one HTTP/2 connection, and each takes ~300ms
-// mostly waiting on the network, so many at once fill a screen in about one round trip.
+// Previews downloading at once. They share a few HTTP/2 connections, and each takes ~300ms
+// mostly waiting on the network, so many at once fill a screen in about one round trip. A new
+// search stops the downloads of emotes it doesn't have.
 inline constexpr int PREVIEW_DOWNLOADS = 32;
 inline constexpr int MAX_SAVED_PREVIEWS = 1000;  // past this many saved previews, forget unshown
-inline constexpr int MAX_GIF_MB = 48;          // past this much downloaded GIF, forget unshown
+// Downloaded animations are kept for going back to a search; past this much, the ones unused
+// the longest are forgotten (and download again if they're wanted).
+inline constexpr int MAX_MOVING_MB = 48;
 inline constexpr int SEARCH_DELAY_MS = 250;   // wait this long after you stop typing to search
 inline constexpr double SCROLL_EASE_MS = 45;  // smooth scrolling: lower is snappier, 0 is instant
 
 inline constexpr const wchar_t* API_URL = L"https://7tv.io/v4/gql";
 // {id}, {size} and {format} are filled in.
 inline constexpr const wchar_t* LINK_URL = L"https://cdn.7tv.app/emote/{id}/{size}.{format}";
-// Previews: a PNG still first (quick), then for animated emotes on screen the GIF.
-// {s} is 1-4 (32-128px tall).
-inline constexpr const wchar_t* THUMB_ANIMATED = L"https://cdn.7tv.app/emote/{id}/{s}x_static.png";
-inline constexpr const wchar_t* THUMB_STATIC = L"https://cdn.7tv.app/emote/{id}/{s}x.png";
-inline constexpr const wchar_t* THUMB_GIF = L"https://cdn.7tv.app/emote/{id}/{s}x.gif";
+// Previews: a still first (quick), then for animated emotes on screen the animation. WebP,
+// 7TV's own format, with PNG or GIF if a WebP can't be had (the second of each pair). WebP is
+// much smaller: popular emotes' 4x stills are ~4 KB instead of ~19 KB as PNG, and their 4x
+// animations about half the size of the GIFs (measured 2026-11-24), with smooth transparent
+// edges. {s} is 1-4 (32-128px tall).
+inline constexpr const wchar_t* THUMB_ANIMATED[] = {L"https://cdn.7tv.app/emote/{id}/{s}x_static.webp",
+                                                    L"https://cdn.7tv.app/emote/{id}/{s}x_static.png"};
+inline constexpr const wchar_t* THUMB_STATIC[] = {L"https://cdn.7tv.app/emote/{id}/{s}x.webp",
+                                                  L"https://cdn.7tv.app/emote/{id}/{s}x.png"};
+inline constexpr const wchar_t* THUMB_MOVING[] = {L"https://cdn.7tv.app/emote/{id}/{s}x.webp",
+                                                  L"https://cdn.7tv.app/emote/{id}/{s}x.gif"};
 
 // Look: Discord's dark theme colors, so the panel feels like part of Discord (0xRRGGBB).
 inline constexpr uint32_t BG = 0x2b2d31, FIELD = 0x1e1f22, HOVER = 0x393c41, SELECTED = 0x404249;

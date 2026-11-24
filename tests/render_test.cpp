@@ -2,6 +2,8 @@
 //   render_test.exe <out dir> [--clipboard] [--gifs N] [--cpu SECONDS]
 //   render_test.exe <out dir> --hold-file <path> <seconds>
 //   render_test.exe <out dir> --auto-size N   (file mode's "auto" size on N animated emotes)
+//   render_test.exe <out dir> --search-speed [ROUNDS] [--pause SECONDS]   (see search_speed)
+//   render_test.exe <out dir> --webp N   (WebP previews decoded, for checking against ffmpeg)
 // Draws the picker at 1451x341 (829x195 at 175%) into PNGs while driving it like a user,
 // writes decoded GIF frames for comparison with the Python version's decoder, measures CPU
 // use while emotes animate, and with --clipboard checks the clipboard borrow round trip.
@@ -109,10 +111,138 @@ struct Tester {
         }
         wprintf(L"Results after %.0f ms, every still in view after %.0f ms\n", results_at, stills_at);
         settle();
-        int requests, http2;
-        net_stats(requests, http2);
-        wprintf(L"GIFs in view ready after %.0f ms; committed %.0f MB, in RAM %.0f MB; %d requests, %d over HTTP/2\n",
-                now_ms() - t0, memory(), ram(), requests, http2);
+        NetStats n = net_stats();
+        wprintf(L"Animations in view ready after %.0f ms; committed %.0f MB, in RAM %.0f MB; %d requests, %d over HTTP/2\n",
+                now_ms() - t0, memory(), ram(), n.requests, n.http2);
+    }
+
+    // ---- how fast a search shows its emotes (--search-speed) ----------------------------------
+
+    struct Phase {
+        double results = -1, first = -1, stills = -1, anims = -1;  // ms after the last letter typed
+        int in_view = 0, animated = 0, moving = 0, blank = 0;
+        NetStats net;  // during the phase
+    };
+    static NetStats minus(const NetStats& a, const NetStats& b) {
+        return {a.requests - b.requests, a.http2 - b.http2, a.bytes - b.bytes, a.cancelled - b.cancelled};
+    }
+    // Clicks the search box, then types q one letter every 120 ms (quick typing). Times are from
+    // the last letter: the results, the first still in view, every still in view, every animated
+    // emote in view moving. lead_ms > 0: stops that long after the results (to type the next
+    // search while this one still loads).
+    Phase search_timed(const std::wstring& q, double lead_ms = 0) {
+        Phase p;
+        NetStats before = net_stats();
+        app.mouse_down(app.field.l + app.field.w() / 2, app.field.t + app.field.h() / 2, false, false);
+        app.mouse_up();
+        app.focused = true;
+        pump_for(400);  // the hand moves to the keyboard
+        app.box.select_all();
+        for (wchar_t c : q) {
+            app.char_typed(c);
+            pump_for(120);
+        }
+        double t0 = now_ms() - 120;
+        while (now_ms() - t0 < 30000) {
+            app.pump(2);
+            double t = now_ms() - t0;
+            if (p.results < 0) {
+                if (app.search_text != q || app.status_text == L"Searching…") continue;
+                p.results = t;
+            }
+            if (lead_ms > 0 && t - p.results >= lead_ms) break;
+            auto [from, to] = app.on_screen();
+            int stills = 0, have = 0, animated = 0, moving = 0, done = 0;
+            for (int i = from; i < to; i++) {
+                const Emote& e = app.emotes[i];
+                std::string key = app.key_of(i);
+                bool still = app.stills.count(key) > 0;
+                have += still;
+                // A still that failed to download stays blank: done too.
+                stills += still || (app.started.count(e.id) && !app.fetching.count(key + "s"));
+                if (!e.animated) continue;
+                animated++;
+                auto a = app.anims.find(key);
+                bool plays = app.anim_at(i) != nullptr;
+                moving += plays;
+                done += plays || (a != app.anims.end() && !a->second && !app.fetching.count(key + "g"));
+            }
+            p.in_view = to - from;
+            p.animated = animated;
+            p.moving = moving;
+            p.blank = p.in_view - have;
+            if (p.first < 0 && have) p.first = t;
+            if (p.stills < 0 && stills == p.in_view) p.stills = t;
+            if (p.stills >= 0 && done == animated) {
+                p.anims = t;
+                break;
+            }
+        }
+        p.net = minus(net_stats(), before);
+        return p;
+    }
+    static void print_phase(const wchar_t* what, const std::wstring& q, const Phase& p) {
+        auto ms = [](double v) { return v < 0 ? std::wstring(L"    -") : std::to_wstring((int)std::lround(v)); };
+        wprintf(L"  %-16ls %-9ls results %5ls, first still %5ls, %2d stills %5ls, %2d/%2d moving %5ls ms; "
+                L"%5.1f MB in %d requests, %d stopped part-way\n",
+                what, (L"\"" + q + L"\"").c_str(), ms(p.results).c_str(), ms(p.first).c_str(), p.in_view,
+                ms(p.stills).c_str(), p.moving, p.animated, ms(p.anims).c_str(), p.net.bytes / 1048576.0,
+                p.net.requests, p.net.cancelled);
+    }
+
+    // Each round: a pause long enough for 7TV to close idle connections (its CDN after 30 s, its
+    // search server after 50 s), then a search; a second search typed 1.5 s after another one's
+    // results came in (while that one's previews still load); then the first search again.
+    // The panel as the user had it on 2026-11-24: 577x569 at 175%, the size slider at 240%
+    // (154px emotes from 4x previews), pasting "auto" gif files (so the files in view download
+    // too). Downloads several MB a round: not while a game is being played on this PC.
+    void search_speed(int rounds, double pause_s) {
+        own_uploads();
+        std::error_code ec;
+        std::filesystem::remove_all(app.files_dir, ec);  // no files downloaded yet
+        app.settings.scale = 2.4;
+        app.settings.paste = L"file";
+        app.settings.size = L"auto";
+        app.settings.format = L"gif";
+        app.layout();
+        wait_search();
+        settle();
+        wprintf(L"Search speed: panel %dx%d, %dpx emotes from %dx previews, %d per row\n", app.win_w, app.win_h,
+                app.emote_h, app.thumb_s, app.cols);
+        const wchar_t* queries[][3] = {{L"pepe", L"kekw", L"catjam"}, {L"peepo", L"monka", L"pog"},
+                                       {L"cat", L"dance", L"sad"},    {L"lul", L"hype", L"wave"}};
+        std::vector<Phase> phases[3];
+        for (int r = 0; r < rounds; r++) {
+            const wchar_t** q = queries[r % std::size(queries)];
+            wprintf(L"Round %d: waiting %.0f s for connections to go idle\n", r + 1, pause_s);
+            pump_for(pause_s * 1000);
+            phases[0].push_back(search_timed(q[0]));
+            print_phase(L"after a pause", q[0], phases[0].back());
+            settle();
+            search_timed(q[1], 1500);
+            phases[1].push_back(search_timed(q[2]));
+            print_phase(L"during another", q[2], phases[1].back());
+            settle();
+            phases[2].push_back(search_timed(q[0]));
+            print_phase(L"again", q[0], phases[2].back());
+            settle();
+        }
+        const wchar_t* names[] = {L"after a pause", L"during another", L"again"};
+        wprintf(L"Medians over %d rounds (ms after the last letter):\n", rounds);
+        for (int k = 0; k < 3; k++) {
+            auto median = [&](double Phase::*field) {
+                std::vector<double> v;
+                for (auto& p : phases[k]) v.push_back(p.*field);
+                std::sort(v.begin(), v.end());
+                return v.empty() ? -1.0 : v[v.size() / 2];
+            };
+            std::vector<double> mb;
+            for (auto& p : phases[k]) mb.push_back(p.net.bytes / 1048576.0);
+            std::sort(mb.begin(), mb.end());
+            wprintf(L"  %-16ls results %5.0f, first still %5.0f, all stills %5.0f, all moving %5.0f; %.1f MB\n", names[k],
+                    median(&Phase::results), median(&Phase::first), median(&Phase::stills), median(&Phase::anims),
+                    mb.empty() ? 0.0 : mb[mb.size() / 2]);
+        }
     }
 
     void ui_shots() {
@@ -309,7 +439,7 @@ struct Tester {
         app.settings.paste = L"file";  // (not through the button: that would fetch the view's files)
         app.settings.size = L"2x";
         app.settings.format = L"gif";
-        app.warm_files();  // as when file mode is picked (or the panel shows, or you search)
+        app.warm_connections();  // as when file mode is picked (or the panel shows, or you search)
         pump_for(1500);
         int still = -1, far_anim = -1;
         auto [from, to] = app.on_screen();
@@ -490,12 +620,10 @@ struct Tester {
         double end = now_ms() + 20000;
         while (now_ms() < end && (playing() < animated_on_screen() || !app.fetching.empty())) app.pump(10);
         wprintf(L"  %d of %d animated emotes on screen are moving\n", playing(), animated_on_screen());
-        double atlas = 0, gif = 0, raw = 0, still = 0;
+        double atlas = 0, moving = 0, raw = 0, still = 0;
         for (auto& [key, a] : app.anims)
-            if (a) {
-                gif += a->gif ? a->gif->size() : 0;
-                if (a->atlas) atlas += a->atlas->GetPixelSize().width * a->atlas->GetPixelSize().height * 4.0;
-            }
+            if (a && a->atlas) atlas += a->atlas->GetPixelSize().width * a->atlas->GetPixelSize().height * 4.0;
+        for (auto& [key, f] : app.moving_files) moving += f.bytes->size();
         for (auto& [key, b] : app.raw) raw += b->size();
         for (auto& [key, s] : app.stills) still += s.w * s.h * 4.0;
         ComPtr<IDXGIDevice> dxgi;
@@ -506,8 +634,8 @@ struct Tester {
             adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local);
             adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &shared);
         }
-        wprintf(L"  frames on the GPU %.1f MB, stills %.1f MB; kept downloads: GIFs %.1f MB, PNGs %.1f MB\n",
-                atlas / 1048576, still / 1048576, gif / 1048576, raw / 1048576);
+        wprintf(L"  frames on the GPU %.1f MB, stills %.1f MB; kept downloads: animations %.1f MB, stills %.1f MB\n",
+                atlas / 1048576, still / 1048576, moving / 1048576, raw / 1048576);
         wprintf(L"  video memory used: %.0f MB on the card, %.0f MB shared; process private %.0f MB\n",
                 local.CurrentUsage / 1048576.0, shared.CurrentUsage / 1048576.0, memory());
         shot(L"08a-frame");
@@ -559,6 +687,58 @@ struct Tester {
             done++;
         }
         wprintf(L"  wrote %d\n", done);
+    }
+
+    // WebP previews decoded by the picker (libwebp), as-is, for checking against another
+    // decoder (ffmpeg's own): for n of these animated emotes their 2x.webp (every frame, in an
+    // atlas) and 2x_static.webp, and for n/2 still ones their 2x.webp. In <out dir>\webp: the
+    // .webp, pixels as .bgra (premultiplied), and .txt: frame w h count cols atlas-width, then
+    // when each frame ends (ms).
+    static void dump_webp(const std::wstring& out, const std::vector<Emote>& emotes, int n) {
+        wprintf(L"WebP frames for comparison\n");
+        CreateDirectoryW((out + L"\\webp").c_str(), nullptr);
+        int moving = 0, stills = 0, failed = 0;
+        auto save = [&](const std::wstring& name, const Bytes& data, const std::vector<uint32_t>& px,
+                        const std::string& meta) {
+            std::wstring base = out + L"\\webp\\" + name;
+            std::ofstream(base + L".webp", std::ios::binary).write((const char*)data.data(), data.size());
+            std::ofstream(base + L".bgra", std::ios::binary).write((const char*)px.data(), px.size() * 4);
+            std::ofstream(base + L".txt") << meta;
+        };
+        for (auto& e : emotes) {
+            bool want = e.animated ? moving < n : stills < n / 2;
+            if (!want) continue;
+            std::wstring id = widen(e.id), url = L"https://cdn.7tv.app/emote/" + id;
+            Bytes data, still;
+            std::wstring err;
+            if (e.animated) {
+                Animation a;
+                Image s;
+                if (!fetch(url + L"/2x.webp", "", data, err) || !decode_animation(data, 0, 0, 16384, a) ||
+                    !fetch(url + L"/2x_static.webp", "", still, err) || !decode_still(still, 0, 0, s)) {
+                    wprintf(L"  %ls: %ls\n", id.c_str(), err.empty() ? L"didn't decode" : err.c_str());
+                    failed++;
+                    continue;
+                }
+                std::string meta = std::to_string(a.w) + " " + std::to_string(a.h) + " " + std::to_string(a.count) +
+                                   " " + std::to_string(a.cols) + " " + std::to_string(a.atlas.w);
+                for (int t : a.ends) meta += " " + std::to_string(t);
+                save(id + L"-moving", data, a.atlas.px, meta);
+                save(id + L"-static", still, s.px,
+                     std::to_string(s.w) + " " + std::to_string(s.h) + " 1 1 " + std::to_string(s.w));
+                moving++;
+            } else {
+                Image s;
+                if (!fetch(url + L"/2x.webp", "", data, err) || !decode_still(data, 0, 0, s)) {
+                    wprintf(L"  %ls: %ls\n", id.c_str(), err.empty() ? L"didn't decode" : err.c_str());
+                    failed++;
+                    continue;
+                }
+                save(id + L"-still", data, s.px, std::to_string(s.w) + " " + std::to_string(s.h) + " 1 1 " + std::to_string(s.w));
+                stills++;
+            }
+        }
+        wprintf(L"  wrote %d animated (with their stills) and %d still emotes; %d failed\n", moving, stills, failed);
     }
 
     // A w x h picture (premultiplied BGRA) scaled to fw x fh.
@@ -810,8 +990,9 @@ struct Tester {
             }
             settle(15000);
             if (r % 4 == 3)
-                wprintf(L"  after %2d searches: committed %.0f MB, in RAM %.0f MB, %zu GIFs kept, %zu PNGs kept\n",
-                        r + 1, memory(), ram(), app.anims.size(), app.raw.size());
+                wprintf(L"  after %2d searches: committed %.0f MB, in RAM %.0f MB, %zu animations (%zu downloads kept), "
+                        L"%zu stills kept\n",
+                        r + 1, memory(), ram(), app.anims.size(), app.moving_files.size(), app.raw.size());
         }
     }
 
@@ -1078,6 +1259,18 @@ int wmain(int argc, wchar_t** argv) {
             fflush(stdout);
             ExitProcess(0);
         }
+    for (int i = 2; i + 1 < argc; i++)
+        if (std::wstring(argv[i]) == L"--webp") {  // WebP decoding alone, without the picker's own downloads
+            std::vector<Emote> popular;
+            std::wstring err;
+            if (!search_emotes(L"", popular, err)) {
+                wprintf(L"search failed: %ls\n", err.c_str());
+                return 1;
+            }
+            Tester::dump_webp(argv[1], popular, _wtoi(argv[i + 1]));
+            fflush(stdout);
+            ExitProcess(0);
+        }
     for (int i = 2; i < argc; i++)
         if (std::wstring(argv[i]) == L"--resize") {
             auto* windowed = new App;
@@ -1089,6 +1282,18 @@ int wmain(int argc, wchar_t** argv) {
     wprintf(L"Private memory before the picker: %.0f MB\n", Tester::memory());
     if (!GetEnvironmentVariableW(L"NO_WARM_UP", nullptr, 0)) net_warm_up(L"https://cdn.7tv.app/");
     CreateDirectoryW(argv[1], nullptr);
+    for (int i = 2; i < argc; i++)
+        if (std::wstring(argv[i]) == L"--search-speed") {  // [rounds] [--pause seconds]
+            int rounds = i + 1 < argc && iswdigit(argv[i + 1][0]) ? _wtoi(argv[i + 1]) : 2;
+            double pause = 60;
+            for (int j = 2; j + 1 < argc; j++)
+                if (std::wstring(argv[j]) == L"--pause") pause = _wtof(argv[j + 1]);
+            auto* timed = new App;
+            if (!timed->init(true, 1010, 996, 1.75)) return 1;  // 577x569 at 175%
+            Tester{*timed, argv[1]}.search_speed(rounds, pause);
+            fflush(stdout);
+            ExitProcess(0);
+        }
     auto* app = new App;
     if (!app->init(true, 1451, 341, 1.75)) {
         wprintf(L"init failed\n");

@@ -4,7 +4,7 @@ A small panel docked to the bottom-right of Discord's window, just above the mes
 
 Discord shows an uploaded picture at its size in pixels, so 7TV's sizes come out smaller (1x, 32px) or bigger (2x, 64px) than Discord's own emotes (48px). With the size set to *auto*, file mode resizes gif and png files to 48px tall to match (`DISCORD_EMOTE_SIZE` in `src/config.h`).
 
-Windows only: C++20 on Win32, Direct2D, DirectWrite, WIC and WinHTTP, with no other dependencies.
+Windows only: C++20 on Win32, Direct2D, DirectWrite, WIC and WinHTTP. The previews are 7TV's WebP files, read with Google's libwebp decoder, included in `third_party/libwebp` (BSD license) and built by `build.cmd`.
 
 ## Build
 

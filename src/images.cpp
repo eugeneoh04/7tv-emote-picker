@@ -7,8 +7,12 @@
 #include <climits>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
+
+#include "webp/decode.h"  // third_party/libwebp
+#include "webp/demux.h"
 
 namespace {
 
@@ -59,12 +63,10 @@ bool copy_scaled(IWICBitmapSource* source, int w, int h, int fw, int fh, uint32_
 }
 
 // The whole W x H picture canvas (premultiplied BGRA), scaled to fw x fh into dest.
-bool scale_canvas(const std::vector<uint32_t>& canvas, int W, int H, int fw, int fh,
-                  uint32_t* dest, UINT stride) {
+bool scale_canvas(const uint32_t* canvas, int W, int H, int fw, int fh, uint32_t* dest, UINT stride) {
     ComPtr<IWICBitmap> bitmap;
     return SUCCEEDED(wic()->CreateBitmapFromMemory(W, H, GUID_WICPixelFormat32bppPBGRA, W * 4,
-                                                   (UINT)canvas.size() * 4, (BYTE*)canvas.data(),
-                                                   &bitmap)) &&
+                                                   (UINT)((size_t)W * H * 4), (BYTE*)canvas, &bitmap)) &&
            copy_scaled(bitmap.Get(), W, H, fw, fh, dest, stride);
 }
 
@@ -518,7 +520,7 @@ bool resize_gif(IWICBitmapDecoder* decoder, int height, Bytes& out) {
     GifWriter gif{w, h, loop_count(global.Get())};
     std::vector<uint32_t> resized((size_t)w * h);
     if (!each_frame(decoder, count, W, H, [&](UINT, const std::vector<uint32_t>& canvas, int delay) {
-            if (!scale_canvas(canvas, W, H, w, h, resized.data(), w * 4)) return false;
+            if (!scale_canvas(canvas.data(), W, H, w, h, resized.data(), w * 4)) return false;
             gif.add(resized.data(), delay);
             return true;
         }))
@@ -569,9 +571,135 @@ bool resize_png(IWICBitmapDecoder* decoder, int height, Bytes& out) {
     return write_png(px, w, h, out);
 }
 
+// ---- previews: the frames of an animation in one picture (atlas) --------------------------
+
+// Sets out up for count frames of a W x H animation shown height tall within room: the size
+// each frame shows at, and an empty atlas with a place for each. False if there are too many
+// pixels, or they don't fit in one texture.
+bool start_atlas(int W, int H, int count, int height, int room, int max_texture, Animation& out) {
+    if (W <= 0 || H <= 0 || count < 2 || (size_t)W * H * count > 32u << 20) return false;  // ~128MB of frames
+    fit(W, H, height, room, out.w, out.h, out.by_room);
+    out.count = count;
+    out.cols = std::max(1, std::min(count, max_texture / out.w));
+    int rows = (count + out.cols - 1) / out.cols;
+    if (rows * out.h > max_texture) return false;
+    out.atlas.w = out.cols * out.w;
+    out.atlas.h = rows * out.h;
+    out.atlas.px.assign((size_t)out.atlas.w * out.atlas.h, 0);
+    out.ends.clear();
+    return true;
+}
+
+// Frame f, the whole W x H picture as it shows then (premultiplied BGRA), into its place in the
+// atlas, shrunk if it has to be.
+bool put_frame(Animation& out, int f, const uint32_t* canvas, int W, int H) {
+    uint32_t* cell = &out.atlas.px[(size_t)(f / out.cols) * out.h * out.atlas.w + (size_t)(f % out.cols) * out.w];
+    if (out.w != W || out.h != H) return scale_canvas(canvas, W, H, out.w, out.h, cell, out.atlas.w * 4);
+    for (int y = 0; y < H; y++) std::copy_n(canvas + (size_t)y * W, W, cell + (size_t)y * out.atlas.w);
+    return true;
+}
+
+// ---- WebP (7TV's own format; Windows can't read it everywhere, so libwebp does) -----------
+
+bool is_webp(const Bytes& data) {
+    return data.size() >= 12 && !memcmp(data.data(), "RIFF", 4) && !memcmp(data.data() + 8, "WEBP", 4);
+}
+
+// Decodes a WebP that moves, frame by frame: frame_ready(f, canvas, ms) gets the whole picture
+// as it shows then (premultiplied BGRA, libwebp layers the frames) and when that frame ends, in
+// ms from the start, as written; it returns false to stop. False if it can't be read.
+template <class Fn>
+bool each_webp_frame(const Bytes& data, int& W, int& H, int& count, Fn&& frame_ready) {
+    WebPBitstreamFeatures features;  // (before the decoder sets aside room for the picture)
+    if (WebPGetFeatures(data.data(), data.size(), &features) != VP8_STATUS_OK || features.width > 4096 ||
+        features.height > 4096)
+        return false;
+    WebPData webp{data.data(), data.size()};
+    WebPAnimDecoderOptions options;
+    if (!WebPAnimDecoderOptionsInit(&options)) return false;
+    options.color_mode = MODE_bgrA;  // premultiplied BGRA, what Direct2D draws
+    options.use_threads = 0;         // each download thread decodes its own
+    std::unique_ptr<WebPAnimDecoder, decltype(&WebPAnimDecoderDelete)> decoder(
+        WebPAnimDecoderNew(&webp, &options), WebPAnimDecoderDelete);
+    WebPAnimInfo info;
+    if (!decoder || !WebPAnimDecoderGetInfo(decoder.get(), &info)) return false;
+    W = (int)info.canvas_width;
+    H = (int)info.canvas_height;
+    count = (int)info.frame_count;
+    for (int f = 0; f < count; f++) {
+        uint8_t* canvas = nullptr;
+        int ends = 0;
+        if (!WebPAnimDecoderGetNext(decoder.get(), &canvas, &ends) ||
+            !frame_ready(f, (const uint32_t*)canvas, ends))
+            return false;
+    }
+    return true;
+}
+
+bool decode_webp_still(const Bytes& data, int height, int room, Image& out) {
+    WebPBitstreamFeatures features;
+    if (WebPGetFeatures(data.data(), data.size(), &features) != VP8_STATUS_OK) return false;
+    int w = features.width, h = features.height;
+    if (w <= 0 || h <= 0 || w > 4096 || h > 4096) return false;
+    std::vector<uint32_t> px((size_t)w * h);
+    if (features.has_animation) {  // its first frame
+        int W, H, count;
+        bool got = false;
+        each_webp_frame(data, W, H, count, [&](int, const uint32_t* canvas, int) {
+            got = W == w && H == h;
+            if (got) std::copy_n(canvas, px.size(), px.data());
+            return false;
+        });
+        if (!got) return false;
+    } else {
+        WebPDecoderConfig config;
+        if (!WebPInitDecoderConfig(&config)) return false;
+        config.output.colorspace = MODE_bgrA;  // premultiplied BGRA, what Direct2D draws
+        config.output.is_external_memory = 1;
+        config.output.u.RGBA.rgba = (uint8_t*)px.data();
+        config.output.u.RGBA.stride = w * 4;
+        config.output.u.RGBA.size = px.size() * 4;
+        if (WebPDecode(data.data(), data.size(), &config) != VP8_STATUS_OK) return false;
+    }
+    fit(w, h, height, room, out.w, out.h, out.by_room);
+    if (out.w == w && out.h == h) {
+        out.px = std::move(px);
+        return true;
+    }
+    out.px.assign((size_t)out.w * out.h, 0);
+    return scale_canvas(px.data(), w, h, out.w, out.h, out.px.data(), out.w * 4);
+}
+
+bool decode_webp_animation(const Bytes& data, int height, int room, int max_texture, Animation& out) {
+    int W = 0, H = 0, count = 0, prev = 0, elapsed = 0;
+    bool started = false;
+    return each_webp_frame(data, W, H, count, [&](int f, const uint32_t* canvas, int ends) {
+               if (!started && !(started = start_atlas(W, H, count, height, room, max_texture, out)))
+                   return false;
+               if (!put_frame(out, f, canvas, W, H)) return false;
+               // Like browsers (and GIFs here), frames with no real duration show for 100ms.
+               int ms = ends - prev;
+               prev = ends;
+               elapsed += ms > 10 ? ms : 100;
+               out.ends.push_back(elapsed);
+               return true;
+           }) &&
+           started;
+}
+
 }  // namespace
 
+bool image_readable(const Bytes& data) {
+    return !is_webp(data) || WebPGetInfo(data.data(), data.size(), nullptr, nullptr);
+}
+
+bool decode_animation(const Bytes& data, int height, int room, int max_texture, Animation& out) {
+    return is_webp(data) ? decode_webp_animation(data, height, room, max_texture, out)
+                         : decode_gif(data, height, room, max_texture, out);
+}
+
 bool decode_still(const Bytes& data, int height, int room, Image& out) {
+    if (is_webp(data)) return decode_webp_still(data, height, room, out);
     auto decoder = open(data);
     ComPtr<IWICBitmapFrameDecode> frame;
     ComPtr<IWICFormatConverter> converter;
@@ -599,29 +727,10 @@ bool decode_gif(const Bytes& data, int height, int room, int max_texture, Animat
     decoder->GetMetadataQueryReader(&global);
     int W = meta_int(global.Get(), L"/logscrdesc/Width", 0);
     int H = meta_int(global.Get(), L"/logscrdesc/Height", 0);
-    if (W <= 0 || H <= 0 || (size_t)W * H * count > 32u << 20) return false;  // ~128MB of frames
-
-    fit(W, H, height, room, out.w, out.h, out.by_room);
-    out.count = (int)count;
-    out.cols = std::max(1, std::min((int)count, max_texture / out.w));
-    int rows = ((int)count + out.cols - 1) / out.cols;
-    if (rows * out.h > max_texture) return false;
-    out.atlas.w = out.cols * out.w;
-    out.atlas.h = rows * out.h;
-    out.atlas.px.assign((size_t)out.atlas.w * out.atlas.h, 0);
-    out.ends.clear();
-
+    if (!start_atlas(W, H, (int)count, height, room, max_texture, out)) return false;
     int elapsed = 0;
     return each_frame(decoder.Get(), count, W, H, [&](UINT f, const std::vector<uint32_t>& canvas, int delay) {
-        // Into the atlas, shrunk if it has to be.
-        uint32_t* cell = &out.atlas.px[(size_t)(f / out.cols) * out.h * out.atlas.w +
-                                       (size_t)(f % out.cols) * out.w];
-        if (out.w == W && out.h == H) {
-            for (int y = 0; y < H; y++)
-                std::copy_n(&canvas[(size_t)y * W], W, cell + (size_t)y * out.atlas.w);
-        } else if (!scale_canvas(canvas, W, H, out.w, out.h, cell, out.atlas.w * 4)) {
-            return false;
-        }
+        if (!put_frame(out, (int)f, canvas.data(), W, H)) return false;
         // Like browsers, frames with no real delay show for 100ms.
         elapsed += delay > 1 ? delay * 10 : 100;
         out.ends.push_back(elapsed);
