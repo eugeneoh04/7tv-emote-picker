@@ -32,6 +32,7 @@ struct Settings {
     std::wstring paste = DEFAULT_PASTE, size = DEFAULT_SIZE, format = DEFAULT_FORMAT;
     int width = DEFAULT_WIDTH, height = DEFAULT_HEIGHT;  // at 100% display scaling
     double scale = 1.0;  // emote size slider: 1 = EMOTE_SIZE's nearest 7TV size, as is
+    bool collapsed = false;  // shrunk to the button (the X)
 };
 Settings load_settings();
 void save_settings(const Settings& s);
@@ -88,7 +89,7 @@ public:
 
 private:
     friend struct Tester;
-    enum class Hot { None, Grip, Field, Gear, Close, Segment, Slider, Grid, Scrollbar };
+    enum class Hot { None, Grip, Field, Gear, Close, Segment, Slider, Grid, Scrollbar, Button };
     enum class Drag { None, Resize, Thumb, Select, Slider };
     struct Still {
         ComPtr<ID2D1Bitmap1> bitmap;
@@ -152,6 +153,8 @@ private:
     std::wstring format_note() const;
     std::wstring auto_note() const;
     void toggle_settings();
+    void collapse(bool shrink);
+    void show_menu();
 
     // ---- layout and input (app_input.cpp)
     double px(double v) const;
@@ -191,6 +194,7 @@ private:
     void draw_settings();
     void draw_grid(double now, double& next_due);
     void draw_status();
+    void draw_button();
     void fill_round(const Box& b, float radius, uint32_t color);
     void text(const std::wstring& s, IDWriteTextFormat* format, const Box& b, uint32_t color);
     float text_width(const std::wstring& s, IDWriteTextFormat* format) const;
@@ -243,9 +247,9 @@ private:
     int buf_w = 0, buf_h = 0;       // the swap chain's buffers (can be bigger than the window)
     int buffer_resizes = 0, resize_failures = 0;  // (tests check these)
     std::wstring text_family = L"Segoe UI", icon_family;
-    ComPtr<IDWriteTextFormat> f_text, f_small, f_small_center, f_icon, f_note, f_status;
+    ComPtr<IDWriteTextFormat> f_text, f_small, f_small_center, f_icon, f_note, f_status, f_button;
     float text_line = 19, small_line = 16;
-    std::wstring glyph_search, glyph_gear, glyph_close;
+    std::wstring glyph_search, glyph_gear, glyph_close, glyph_emoji;
     mutable ComPtr<IDWriteTextLayout> layout_cache;
     mutable std::wstring layout_text;
     std::unordered_map<std::wstring, ComPtr<IDWriteTextLayout>> text_layouts;  // see text()
@@ -275,6 +279,7 @@ private:
     bool focused = false, caret_on = true;
     float text_scroll = 0;
     double last_click = 0;
+    double opened_at = -1e9;       // when the button last opened the panel (see mouse_down)
     int clicks = 0;
     TextBox box;
     bool settings_open = false;

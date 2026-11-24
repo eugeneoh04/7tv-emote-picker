@@ -161,6 +161,7 @@ Settings load_settings() {
     if (j["scale"].is(Json::Number))
         s.scale = std::clamp(std::round(j["scale"].number / EMOTE_SCALE_STEP) * EMOTE_SCALE_STEP,
                              MIN_EMOTE_SCALE, MAX_EMOTE_SCALE);
+    if (j["collapsed"].is(Json::Bool)) s.collapsed = j["collapsed"].boolean;
     return s;
 }
 
@@ -172,7 +173,8 @@ void save_settings(const Settings& s) {
                        ",\n  \"format\": " + json_quote(narrow(s.format)) +
                        ",\n  \"width\": " + std::to_string(s.width) +
                        ",\n  \"height\": " + std::to_string(s.height) +
-                       ",\n  \"scale\": " + scale + "\n}";
+                       ",\n  \"scale\": " + scale +
+                       ",\n  \"collapsed\": " + (s.collapsed ? "true" : "false") + "\n}";
     std::wstring path = settings_path(), temp = path + L".tmp";
     {
         std::ofstream f(temp, std::ios::binary | std::ios::trunc);
@@ -387,7 +389,7 @@ LRESULT App::handle(UINT msg, WPARAM wp, LPARAM lp) {
                 win_w = LOWORD(lp);
                 win_h = HIWORD(lp);
                 resize_target();
-                layout();
+                if (!settings.collapsed) layout();  // the button has nothing to lay out
                 render();
             }
             return 0;
@@ -402,6 +404,11 @@ LRESULT App::handle(UINT msg, WPARAM wp, LPARAM lp) {
         case WM_LBUTTONUP:
             mouse_up();
             return 0;
+        case WM_RBUTTONUP: {
+            Hot h = hit((float)GET_X_LPARAM(lp), (float)GET_Y_LPARAM(lp));
+            if (h == Hot::Button || h == Hot::Close) show_menu();
+            return 0;
+        }
         case WM_CAPTURECHANGED:
             note(L"mouse capture lost to %ls", describe((HWND)lp).c_str());
             if ((HWND)lp != hwnd && drag != Drag::None) mouse_up();
@@ -433,7 +440,7 @@ LRESULT App::handle(UINT msg, WPARAM wp, LPARAM lp) {
             POINT p;
             GetCursorPos(&p);
             ScreenToClient(hwnd, &p);
-            bool field_hit = hit((float)p.x, (float)p.y) == Hot::Field;
+            bool field_hit = !settings.collapsed && hit((float)p.x, (float)p.y) == Hot::Field;
             note(L"click: %ls; in front: %ls", field_hit ? L"activate (search box)" : L"don't activate",
                  describe(GetForegroundWindow()).c_str());
             return field_hit ? MA_ACTIVATE : MA_NOACTIVATE;
@@ -558,8 +565,11 @@ void App::dock() {
         layout();
     }
     int mr = (int)std::lround(DOCK_MARGIN_RIGHT * k), mb = (int)std::lround(DOCK_MARGIN_BOTTOM * k);
-    int w = std::max(1, std::min((int)std::lround(settings.width * k), (int)(r.right - r.left) - mr));
-    int h = std::max(1, std::min((int)std::lround(settings.height * k), (int)(r.bottom - r.top) - mb));
+    // Shrunk to the button: it sits where the panel's bottom-right corner goes.
+    int want_w = settings.collapsed ? BUTTON_SIZE : settings.width;
+    int want_h = settings.collapsed ? BUTTON_SIZE : settings.height;
+    int w = std::max(1, std::min((int)std::lround(want_w * k), (int)(r.right - r.left) - mr));
+    int h = std::max(1, std::min((int)std::lround(want_h * k), (int)(r.bottom - r.top) - mb));
     RECT pos{r.right - mr - w, r.bottom - mb - h, w, h};
     if (!dock_pos || memcmp(&pos, &*dock_pos, sizeof(pos))) {
         bool showing = !dock_pos;
@@ -907,4 +917,62 @@ std::wstring App::format_note() const {
 void App::toggle_settings() {
     settings_open = !settings_open;
     layout();
+}
+
+// The X shrinks the panel to a button in the same corner of Discord (shrink), and clicking the
+// button opens it again. The picker keeps running either way; it quits from show_menu().
+void App::collapse(bool shrink) {
+    if (settings.collapsed == shrink) return;
+    note(shrink ? L"shrink to the button" : L"open from the button");
+    if (drag != Drag::None) mouse_up();
+    settings.collapsed = shrink;
+    if (!shrink) opened_at = now_ms();
+    save_settings(settings);
+    hot = Hot::None;
+    hot_segment = -1;
+    hover_i = -1;
+    KillTimer(hwnd, timer::prefetch);
+    // Typing in the search box put the picker in front: hand the keyboard back to Discord.
+    if (shrink && !headless && GetForegroundWindow() == hwnd && target_hwnd && IsWindow(target_hwnd))
+        bring_forward(target_hwnd);
+    if (headless) {  // tests: no Discord to dock to, so take the size dock() would give
+        win_w = (int)std::lround((shrink ? BUTTON_SIZE : settings.width) * k);
+        win_h = (int)std::lround((shrink ? BUTTON_SIZE : settings.height) * k);
+        resize_target();
+        if (!shrink) layout();
+    }
+    dock();  // resizes the window; WM_SIZE lays it out and draws it
+    if (!shrink && mouse_inside && !headless) {  // the panel is under the mouse now
+        POINT p;
+        GetCursorPos(&p);
+        ScreenToClient(hwnd, &p);
+        mouse_move((float)p.x, (float)p.y);
+    }
+    request_frame();
+}
+
+// Right-clicking the button or the X: open (or shrink) the panel, or quit.
+void App::show_menu() {
+    if (headless) return;
+    HMENU menu = CreatePopupMenu();
+    enum { open_id = 1, quit_id };
+    AppendMenuW(menu, MF_STRING, open_id, settings.collapsed ? L"Open emote picker" : L"Shrink to button");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, quit_id, L"Quit");
+    POINT p;
+    GetCursorPos(&p);
+    // A menu only closes properly when its window is in front (allowed: you just clicked it).
+    HWND back = GetForegroundWindow();
+    SetForegroundWindow(hwnd);
+    int picked = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_RIGHTALIGN | TPM_BOTTOMALIGN,
+                                p.x, p.y, 0, hwnd, nullptr);
+    PostMessageW(hwnd, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+    if (picked == quit_id) {
+        DestroyWindow(hwnd);
+        return;
+    }
+    // Discord gets the keyboard back, as before the right-click.
+    if (back && back != hwnd && IsWindow(back) && GetForegroundWindow() == hwnd) bring_forward(back);
+    if (picked == open_id) collapse(!settings.collapsed);
 }

@@ -256,6 +256,42 @@ struct Tester {
         }
     }
 
+    // The X shrinks the panel to a button; clicking the button opens it again.
+    void button_shots() {
+        int w = app.win_w, h = app.win_h;
+        // headless, the panel reopens at the saved size: the size this run started at
+        app.settings.width = (int)std::lround(w / app.k);
+        app.settings.height = (int)std::lround(h / app.k);
+        app.mouse_inside = true;
+        app.mouse_down(app.close.l + 2, app.close.t + 2, false, false);
+        app.mouse_up();
+        app.mouse_leave();
+        shot(L"07a-button");
+        bool shrunk = app.settings.collapsed && app.win_w == (int)std::lround(BUTTON_SIZE * app.k) && app.win_h == app.win_w;
+        app.mouse_move(app.win_w / 2.f, app.win_h / 2.f);
+        shot(L"07b-button-hover");
+        bool saved = load_settings().collapsed;
+        int emotes_before = (int)app.emotes.size();
+        app.mouse_down(app.win_w / 2.f, app.win_h / 2.f, false, false);
+        app.mouse_up();
+        // A quick second click (a double-click) must not paste whatever opened under the mouse.
+        app.dry_run = true;
+        app.dry_pasted = {};
+        app.mouse_down(cell_x(0), cell_y(0), false, true);
+        bool pasted = !app.dry_pasted.empty();
+        app.dry_run = false;
+        app.mouse_leave();
+        settle();
+        shot(L"07c-opened-again");
+        wprintf(L"  X -> button %dx%d (%ls), saved: %ls; reopened %dx%d (%ls), %d emotes kept (%ls), "
+                L"double-click pasted: %ls\n",
+                shrunk ? (int)std::lround(BUTTON_SIZE * app.k) : -1, shrunk ? (int)std::lround(BUTTON_SIZE * app.k) : -1,
+                shrunk ? L"ok" : L"WRONG", saved ? L"yes" : L"NO", app.win_w, app.win_h,
+                app.win_w == w && app.win_h == h && !app.settings.collapsed ? L"ok" : L"WRONG",
+                (int)app.emotes.size(), (int)app.emotes.size() == emotes_before ? L"ok" : L"WRONG",
+                pasted ? L"YES (wrong)" : L"no (ok)");
+    }
+
     void ui_shots() {
         wprintf(L"UI at %dx%d, scale %.2f\n", app.win_w, app.win_h, app.k);
         if (!settle()) wprintf(L"  (timed out waiting for previews)\n");
@@ -1429,6 +1465,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     t.startup();
     t.ui_shots();
+    t.button_shots();
     t.slider_shots();
     t.settings_shots();
     t.file_mode();

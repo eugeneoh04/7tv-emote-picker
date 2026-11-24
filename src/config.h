@@ -61,6 +61,10 @@ inline constexpr const wchar_t* DISCORD_EXES[] = {L"discord.exe", L"discordptb.e
 // The bottom gap keeps Discord's message box uncovered.
 inline constexpr int DOCK_MARGIN_RIGHT = 16;
 inline constexpr int DOCK_MARGIN_BOTTOM = 80;
+// The X doesn't quit: it shrinks the panel to a round button this big (at 100% display
+// scaling) in the same corner of Discord. Click the button to open the panel again; right-click
+// it (or the X) to quit.
+inline constexpr int BUTTON_SIZE = 40;
 // Discord's focus and position are followed through Windows events, instantly; this is
 // only a safety net in case one is missed.
 inline constexpr int FOLLOW_POLL_MS = 200;

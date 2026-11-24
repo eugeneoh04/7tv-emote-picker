@@ -3,8 +3,9 @@
 A tiny borderless panel docked to the bottom-right of Discord, just above the message box.
 It only shows while Discord (or the picker itself) is focused. Type to search 7TV, click an
 emote and its link is pasted into Discord. The link only borrows the clipboard: whatever you
-had copied before is put back right after. Drag the corner grip to resize, click the X to
-quit. Starting it again (say, after rebuilding) replaces the copy that's running, including
+had copied before is put back right after. Drag the corner grip to resize. The X shrinks it to a
+small button in the same corner of Discord (click it to open the panel again); right-click
+the button or the X to quit. Starting it again (say, after rebuilding) replaces the copy that's running, including
 the old Python version.
 
 Build with build.cmd; run "7TV Emote Picker.exe". Settings you might change are in config.h.
