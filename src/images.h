@@ -26,3 +26,7 @@ struct Animation {
 };
 // False if it's not a GIF that moves (or it's too big to show).
 bool decode_gif(const Bytes& data, int height, int room, int max_texture, Animation& out);
+
+// File mode's "auto" size: a GIF (every frame, with its timing) or PNG made height pixels tall,
+// keeping its shape, as the same kind of file. False if it's neither, or already no taller.
+bool resize_image(const Bytes& data, int height, Bytes& out);

@@ -4,8 +4,8 @@
 #include <cstdint>
 
 // The pasted link's size and format are picked with the gear button in the app and saved to
-// settings.json next to the program, with the panel size.
-inline constexpr const wchar_t* LINK_SIZES[] = {L"1x", L"2x", L"3x", L"4x"};
+// settings.json next to the program, with the panel size. "auto" is DISCORD_EMOTE_SIZE below.
+inline constexpr const wchar_t* LINK_SIZES[] = {L"1x", L"2x", L"3x", L"4x", L"auto"};
 inline constexpr const wchar_t* LINK_FORMATS[] = {L"webp", L"avif", L"gif", L"png"};
 inline constexpr const wchar_t* DEFAULT_SIZE = L"4x";
 inline constexpr const wchar_t* DEFAULT_FORMAT = L"webp";
@@ -28,6 +28,14 @@ inline constexpr int FILE_PREFETCH_MS = 150;
 // Clicking an emote whose file isn't downloaded yet pastes it once it is, unless that takes
 // longer than this (then it isn't pasted; click again).
 inline constexpr int FILE_WAIT_MS = 10000;
+// The "auto" size: in file mode, emotes are resized to this many pixels tall, the size Discord
+// shows its own emotes at in a message of their own. Discord shows an uploaded picture at its
+// size in pixels, so 7TV's 32px (1x) looks too small next to its emotes and 64px (2x) too big.
+// Discord's emotes are 3x its chat font size: 48px at the default 16px (Discord's settings,
+// Appearance, Chat font scaling). Only gif and png files can be resized, so picking "auto"
+// switches to pasting files, and from webp or avif to gif. Links, and webp or avif files picked
+// afterwards, get the 7TV size just above (2x).
+inline constexpr int DISCORD_EMOTE_SIZE = 48;
 
 inline constexpr bool ADD_SPACE_AFTER = false;  // append a space after the pasted link
 // After clicking an emote while you were typing in the picker, give Discord this long to

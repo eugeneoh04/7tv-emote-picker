@@ -37,6 +37,9 @@ Settings load_settings();
 void save_settings(const Settings& s);
 std::wstring emote_link(const Emote& e, const Settings& s);
 std::wstring emote_format(const Emote& e, const Settings& s);  // the link's file type
+std::wstring link_size(const Settings& s);  // the link's 7TV size, 1x-4x ("auto" picks one)
+// How tall file mode makes emote e's file (the "auto" size), or 0: as 7TV made it.
+int file_height(const Emote& e, const Settings& s);
 
 struct Box {
     float l = 0, t = 0, r = 0, b = 0;
@@ -135,13 +138,14 @@ private:
     void file_done(const FileDone& d);
     void deliver_pending();
     void say(const std::wstring& text);
-    void flash(const std::wstring& text);
+    void flash(const std::wstring& text, UINT ms = 1500);
     void query_changed();
     void search_now();
     void show_results(std::vector<Emote> found);
     void set_option(const Segment& seg);
     std::wstring& option_value(Option group);
     std::wstring format_note() const;
+    std::wstring auto_note() const;
     void toggle_settings();
 
     // ---- layout and input (app_input.cpp)

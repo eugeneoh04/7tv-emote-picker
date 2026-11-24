@@ -188,9 +188,22 @@ std::wstring emote_format(const Emote& e, const Settings& s) {
     return s.format;
 }
 
+// "auto" links (and downloads) the smallest 7TV size at least as tall as Discord's emotes:
+// files resize from it, and a bigger one would only take longer to download.
+std::wstring link_size(const Settings& s) {
+    if (s.size != L"auto") return s.size;
+    return std::to_wstring(std::clamp((DISCORD_EMOTE_SIZE + 31) / 32, 1, 4)) + L"x";
+}
+
+// Only gif and png files can be written here, so webp and avif ones stay as they are.
+int file_height(const Emote& e, const Settings& s) {
+    std::wstring format = emote_format(e, s);
+    return s.size == L"auto" && (format == L"gif" || format == L"png") ? DISCORD_EMOTE_SIZE : 0;
+}
+
 std::wstring emote_link(const Emote& e, const Settings& s) {
     std::wstring url = replace_all(LINK_URL, L"{id}", widen(e.id));
-    url = replace_all(url, L"{size}", s.size);
+    url = replace_all(url, L"{size}", link_size(s));
     return replace_all(url, L"{format}", emote_format(e, s));
 }
 
@@ -626,10 +639,12 @@ void App::warm_files() {
     if (settings.paste == L"file") net_warm_alone(L"https://cdn.7tv.app/");
 }
 
-// Where emote e's file goes in file mode: a folder for the emote and size, the file named
-// after the emote (Discord shows that name).
+// Where emote e's file goes in file mode: a folder for the emote and size ("2x", or "48px" for
+// one resized to that), the file named after the emote (Discord shows that name).
 std::wstring App::file_for(const Emote& e) const {
-    return files_dir + widen(e.id) + L"-" + settings.size + L"\\" + safe_file_name(e.name) + L"." +
+    int height = file_height(e, settings);
+    std::wstring size = height ? std::to_wstring(height) + L"px" : link_size(settings);
+    return files_dir + widen(e.id) + L"-" + size + L"\\" + safe_file_name(e.name) + L"." +
            emote_format(e, settings);
 }
 
@@ -645,10 +660,19 @@ void App::fetch_file(const Emote& e, bool ahead) {
     }
     downloading.insert(path);
     files_ahead += ahead;
-    std::thread([this, url = emote_link(e, settings), path, ahead] {
+    std::thread([this, url = emote_link(e, settings), path, ahead, height = file_height(e, settings)] {
         FileDone d{path, L"", ahead};
         Bytes data;
         bool got = ahead ? fetch(url, "", data, d.error) : fetch_alone(url, data, d.error);
+        // The "auto" size: made as tall as Discord's own emotes (left as 7TV made it if that
+        // fails, so it still pastes). Below normal priority, like the previews.
+        if (got && height) {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+            HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            Bytes resized;
+            if (resize_image(data, height, resized)) data = std::move(resized);
+            if (SUCCEEDED(com)) CoUninitialize();
+        }
         if (got && !save_file(path, data)) d.error = L"couldn't save it";
         {
             std::lock_guard lock(result_mutex);
@@ -750,11 +774,11 @@ void App::say(const std::wstring& s) {
     request_frame();
 }
 
-// Shows text on the status line for a moment.
-void App::flash(const std::wstring& s) {
+// Shows text on the status line for a moment (ms).
+void App::flash(const std::wstring& s, UINT ms) {
     flash_text = s;
     flashing = true;
-    SetTimer(hwnd, timer::flash, 1500, nullptr);
+    SetTimer(hwnd, timer::flash, ms, nullptr);
     request_frame();
 }
 
@@ -816,9 +840,26 @@ std::wstring& App::option_value(Option group) {
 
 void App::set_option(const Segment& seg) {
     option_value(seg.group) = seg.option;
+    // Only files can be resized, and only gif and png ones: picking "auto" switches to those
+    // (otherwise it would paste 7TV's 2x, and look no different).
+    if (seg.group == Option::Size && seg.option == L"auto") {
+        settings.paste = L"file";
+        if (settings.format == L"webp" || settings.format == L"avif") settings.format = L"gif";
+    }
     save_settings(settings);
     warm_files();
     layout();  // the note next to the formats changes
+    if (settings.size == L"auto") flash(auto_note(), 4000);
+}
+
+// What the "auto" size does with the paste mode and format picked now (short enough for the
+// status line of the narrowest panel).
+std::wstring App::auto_note() const {
+    std::wstring size = link_size(settings);
+    if (settings.paste != L"file") return L"Only files are resized; links stay " + size;
+    if (settings.format == L"webp" || settings.format == L"avif")
+        return settings.format + L" stays " + size + L"; gif and png resize";
+    return L"Made " + std::to_wstring(DISCORD_EMOTE_SIZE) + L"px tall, like Discord's emotes";
 }
 
 // What the format buttons don't say: 7TV has gif only for animated emotes and png only for

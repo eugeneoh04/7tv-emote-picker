@@ -1,6 +1,7 @@
 // Offscreen checks for the picker: no window is ever shown and nothing takes the focus.
 //   render_test.exe <out dir> [--clipboard] [--gifs N] [--cpu SECONDS]
 //   render_test.exe <out dir> --hold-file <path> <seconds>
+//   render_test.exe <out dir> --auto-size N   (file mode's "auto" size on N animated emotes)
 // Draws the picker at 1451x341 (829x195 at 175%) into PNGs while driving it like a user,
 // writes decoded GIF frames for comparison with the Python version's decoder, measures CPU
 // use while emotes animate, and with --clipboard checks the clipboard borrow round trip.
@@ -19,6 +20,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <tuple>
 
@@ -70,6 +72,14 @@ struct Tester {
 
     void wait_search() {
         for (int i = 0; i < 300 && app.status_text == L"Searching…"; i++) app.pump(10);
+    }
+
+    // Files the tests download (file mode) go in <out dir>\uploads, never in your own folder.
+    void own_uploads() {
+        wchar_t full[MAX_PATH];
+        GetFullPathNameW((out + L"\\uploads\\").c_str(), MAX_PATH, full, nullptr);
+        app.files_dir = full;
+        app.files_here.clear();
     }
 
     static double memory() {
@@ -235,7 +245,27 @@ struct Tester {
                 shot(name.c_str());
             }
         }
+        // "auto" from a fresh settings file (link, 4x, webp): it switches to gif files, since only
+        // those resize. Picking link or webp after it says what that does, on the status line.
+        // At the narrowest width, where the status line is shortest.
+        app.settings = Settings{};
+        app.layout();
+        auto click = [&](const wchar_t* option, const wchar_t* name) {
+            for (auto& seg : app.segments)
+                if (seg.option == option) {
+                    app.set_option(seg);
+                    break;
+                }
+            wprintf(L"  %-34ls now %ls, %ls, %ls: \"%ls\"\n", name, app.settings.paste.c_str(), app.settings.size.c_str(),
+                    app.settings.format.c_str(), app.flashing ? app.flash_text.c_str() : L"(nothing)");
+            shot(name);
+        };
+        click(L"auto", L"10b-auto-from-link-webp");
+        click(L"link", L"10c-auto-then-link");
+        click(L"file", L"10d-auto-then-file");
+        click(L"webp", L"10e-auto-then-webp");
         app.settings = saved;
+        save_settings(app.settings);
         size_to(w0, h0);
         app.toggle_settings();
         settle();
@@ -256,6 +286,10 @@ struct Tester {
         std::string s(n, '\0');
         f.read(s.data(), n);
         return s;
+    }
+    static Bytes read_file(const std::wstring& path) {
+        std::ifstream f(path, std::ios::binary);
+        return Bytes(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     }
 
     // File mode, dry run (nothing goes on the clipboard and no key is pressed): the mouse
@@ -357,6 +391,36 @@ struct Tester {
         Emote odd{"0000TESTID", L"wh?at:<>.", false}, device{"0000TESTID", L"CON", false};
         wprintf(L"  file names: \"%ls\", \"%ls\"\n", std::filesystem::path(app.file_for(odd)).filename().c_str(),
                 std::filesystem::path(app.file_for(device)).filename().c_str());
+        // The "auto" size: the same two emotes' files, resized to Discord's emote size on the way
+        // in (the 2x ones above are what they're made from). The GIF keeps every frame and its
+        // timing.
+        app.settings.size = L"auto";
+        std::wstring auto_gif = app.file_for(app.emotes[far_anim]), auto_png = app.file_for(app.emotes[still]);
+        app.dry_pasted.clear();
+        t0 = now_ms();
+        app.paste(far_anim);
+        while (now_ms() - t0 < 15000 && app.dry_pasted.empty()) app.pump(5);
+        double auto_ms = now_ms() - t0;
+        bool gif_pasted = dropped_file(app.dry_pasted) == auto_gif;
+        app.dry_pasted.clear();
+        app.paste(still);
+        for (double t1 = now_ms(); now_ms() - t1 < 15000 && app.dry_pasted.empty();) app.pump(5);
+        bool png_pasted = dropped_file(app.dry_pasted) == auto_png;
+        Animation a2, a48;
+        Image s2, s48;
+        bool gif_ok = decode_gif(read_file(path), 0, 0, 16384, a2) && decode_gif(read_file(auto_gif), 0, 0, 16384, a48);
+        bool png_ok = decode_still(read_file(still_path), 0, 0, s2) && decode_still(read_file(auto_png), 0, 0, s48);
+        wprintf(L"  auto size, animated: pasted %ls after %.0f ms, GIF %dx%d from %dx%d, %d of %d frames, same timing: %ls, "
+                L"%llu KB (2x: %llu KB)\n",
+                gif_pasted ? L"yes" : L"NO", auto_ms, a48.w, a48.h, a2.w, a2.h, a48.count, a2.count,
+                gif_ok && a48.ends == a2.ends ? L"yes" : L"NO",
+                (unsigned long long)std::filesystem::file_size(auto_gif, ec) / 1024,
+                (unsigned long long)std::filesystem::file_size(path, ec) / 1024);
+        wprintf(L"  auto size, still: pasted %ls, PNG %dx%d from %dx%d, PNG file: %ls\n", png_pasted ? L"yes" : L"NO",
+                s48.w, s48.h, s2.w, s2.h, png_ok && head(auto_png, 4) == "\x89PNG" ? L"yes" : L"NO");
+        wprintf(L"    %ls\n", auto_gif.c_str());
+        app.settings.paste = L"link";
+        wprintf(L"  auto size, link mode: %ls\n", emote_link(app.emotes[far_anim], app.settings).c_str());
         app.settings = saved;
         app.dry_run = false;
         settle();
@@ -495,6 +559,208 @@ struct Tester {
             done++;
         }
         wprintf(L"  wrote %d\n", done);
+    }
+
+    // A w x h picture (premultiplied BGRA) scaled to fw x fh.
+    static std::vector<uint32_t> scaled(const std::vector<uint32_t>& px, int w, int h, int fw, int fh,
+                                        WICBitmapInterpolationMode mode) {
+        std::vector<uint32_t> to((size_t)fw * fh, 0);
+        ComPtr<IWICImagingFactory> wic;
+        ComPtr<IWICBitmap> bitmap;
+        ComPtr<IWICBitmapScaler> scaler;
+        if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) &&
+            SUCCEEDED(wic->CreateBitmapFromMemory(w, h, GUID_WICPixelFormat32bppPBGRA, w * 4, (UINT)px.size() * 4,
+                                                  (BYTE*)px.data(), &bitmap)) &&
+            SUCCEEDED(wic->CreateBitmapScaler(&scaler)) && SUCCEEDED(scaler->Initialize(bitmap.Get(), fw, fh, mode)))
+            scaler->CopyPixels(nullptr, fw * 4, (UINT)to.size() * 4, (BYTE*)to.data());
+        return to;
+    }
+    // Frame f of an animation, on its own.
+    static std::vector<uint32_t> frame_of(const Animation& a, int f) {
+        std::vector<uint32_t> px((size_t)a.w * a.h);
+        const uint32_t* cell = &a.atlas.px[(size_t)(f / a.cols) * a.h * a.atlas.w + (size_t)(f % a.cols) * a.w];
+        for (int y = 0; y < a.h; y++) std::copy_n(cell + (size_t)y * a.atlas.w, a.w, &px[(size_t)y * a.w]);
+        return px;
+    }
+    // Draws px (premultiplied BGRA, w x h) over the opaque picture `to` (to_w wide) at x, y.
+    static void paint(std::vector<uint32_t>& to, int to_w, int x, int y, const std::vector<uint32_t>& px, int w, int h) {
+        int to_h = (int)(to.size() / to_w);
+        for (int j = 0; j < h; j++)
+            for (int i = 0; i < w; i++) {
+                if (x + i < 0 || x + i >= to_w || y + j < 0 || y + j >= to_h) continue;
+                uint32_t s = px[(size_t)j * w + i], a = s >> 24, blended = 0xFF000000;
+                uint32_t& d = to[(size_t)(y + j) * to_w + x + i];
+                for (int sh = 0; sh < 24; sh += 8)
+                    blended |= std::min(255u, (s >> sh & 0xFF) + (d >> sh & 0xFF) * (255 - a) / 255) << sh;
+                d = blended;
+            }
+    }
+    static bool save_picture(const std::wstring& path, std::vector<uint32_t>& px, int w, int h) {
+        ComPtr<IWICImagingFactory> wic;
+        ComPtr<IWICStream> stream;
+        ComPtr<IWICBitmapEncoder> encoder;
+        ComPtr<IWICBitmapFrameEncode> frame;
+        WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
+        return SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) &&
+               SUCCEEDED(wic->CreateStream(&stream)) &&
+               SUCCEEDED(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE)) &&
+               SUCCEEDED(wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)) &&
+               SUCCEEDED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) &&
+               SUCCEEDED(encoder->CreateNewFrame(&frame, nullptr)) && SUCCEEDED(frame->Initialize(nullptr)) &&
+               SUCCEEDED(frame->SetSize(w, h)) && SUCCEEDED(frame->SetPixelFormat(&format)) &&
+               SUCCEEDED(frame->WritePixels(h, w * 4, w * h * 4, (BYTE*)px.data())) && SUCCEEDED(frame->Commit()) &&
+               SUCCEEDED(encoder->Commit());
+    }
+
+    // File mode's "auto" size on the first n animated results: each 2x GIF resized to Discord's
+    // emote size, read back (by WIC), and compared with the same frames scaled without the GIF
+    // step: same size, frames and timing, the same pixels transparent, colors close. Saves the
+    // GIFs in <out>\resized (to try other decoders on) and, for the six whose colors came out
+    // furthest off, frames zoomed in 4x (scaled, then as written) and 1x, auto and 2x side by
+    // side the way Discord shows them at 175%.
+    void resize_check(int n) {
+        wprintf(L"Auto size: the first %d animated emotes, 2x GIF to %dpx tall\n", n, DISCORD_EMOTE_SIZE);
+        std::wstring dir = out + L"\\resized";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        struct Sample {
+            Animation want, got, one, two;
+        };
+        std::vector<std::pair<double, const Emote*>> by_error;
+        std::vector<double> times;
+        int good = 0, bad = 0, worst_max = 0;
+        double worst_mean = 0;
+        size_t bytes_in = 0, bytes_out = 0;
+        for (auto& e : app.emotes) {
+            if (!e.animated || good + bad >= n) continue;
+            std::wstring url = L"https://cdn.7tv.app/emote/" + widen(e.id), err;
+            Bytes src, made;
+            if (!fetch(url + L"/2x.gif", "", src, err)) {
+                wprintf(L"  %hs: %ls\n", e.id.c_str(), err.c_str());
+                continue;
+            }
+            double t0 = now_ms();
+            bool resized = resize_image(src, DISCORD_EMOTE_SIZE, made);
+            double took = now_ms() - t0;
+            times.push_back(took);
+            Sample s;
+            if (!resized || !decode_gif(src, DISCORD_EMOTE_SIZE, 0, 16384, s.want) ||
+                !decode_gif(made, 0, 0, 16384, s.got) || !decode_gif(src, 0, 0, 16384, s.two)) {
+                wprintf(L"  %-24ls %ls\n", e.name.substr(0, 24).c_str(), resized ? L"made, but doesn't read back" : L"NOT resized");
+                bad++;
+                continue;
+            }
+            std::ofstream(dir + L"\\" + widen(e.id) + L".gif", std::ios::binary).write((const char*)made.data(), made.size());
+            std::ofstream(dir + L"\\" + widen(e.id) + L"-2x.gif", std::ios::binary).write((const char*)src.data(), src.size());
+            {  // its frames as read back, one after another (BGRA), to compare with other decoders'
+                std::ofstream raw(dir + L"\\" + widen(e.id) + L".bgra", std::ios::binary);
+                for (int f = 0; f < s.got.count; f++) {
+                    auto px = frame_of(s.got, f);
+                    raw.write((const char*)px.data(), px.size() * 4);
+                }
+            }
+            bytes_in += src.size();
+            bytes_out += made.size();
+            bool same = s.want.w == s.got.w && s.want.h == s.got.h && s.want.count == s.got.count && s.want.ends == s.got.ends;
+            // Pixel by pixel: transparent where the scaled frame is under half opaque, otherwise its
+            // color, give or take what bringing it down to 255 colors costs.
+            long long opaque = 0, alpha_wrong = 0;
+            double err_sum = 0;
+            int err_max = 0;
+            for (size_t i = 0; same && i < s.want.atlas.px.size(); i++) {
+                uint32_t w = s.want.atlas.px[i], g = s.got.atlas.px[i], a = w >> 24;
+                bool want_opaque = a >= 128, got_opaque = g >> 24 == 255;
+                if (want_opaque != got_opaque || (!got_opaque && g != 0)) {
+                    alpha_wrong++;
+                    continue;
+                }
+                if (!want_opaque) continue;
+                opaque++;
+                for (int sh = 0; sh < 24; sh += 8) {
+                    int wc = (int)std::min(255u, ((w >> sh & 0xFF) * 255 + a / 2) / a), gc = g >> sh & 0xFF;
+                    err_sum += std::abs(wc - gc);
+                    err_max = std::max(err_max, std::abs(wc - gc));
+                }
+            }
+            double err_mean = opaque ? err_sum / (opaque * 3.0) : 0;
+            bool ok = same && alpha_wrong == 0;
+            good += ok;
+            bad += !ok;
+            worst_mean = std::max(worst_mean, err_mean);
+            worst_max = std::max(worst_max, err_max);
+            wprintf(L"  %-24ls %3dx%-3d -> %3dx%-3d %3d frames, timing %ls, transparency wrong %lld px, color off %.2f "
+                    L"on average (at most %3d), %4zu -> %4zu KB, %4.0f ms\n",
+                    e.name.substr(0, 24).c_str(), s.two.w, s.two.h, s.got.w, s.got.h, s.got.count,
+                    same ? L"same" : L"DIFFERENT", alpha_wrong, err_mean, err_max, src.size() / 1024, made.size() / 1024,
+                    took);
+            if (ok) by_error.push_back({err_mean, &e});
+        }
+        std::sort(times.begin(), times.end());
+        wprintf(L"  %d of %d fine; color off %.2f on average at worst (at most %d); %zu KB of 2x GIFs made %zu KB; "
+                L"resizing took median %.0f ms, slowest %.0f ms\n",
+                good, good + bad, worst_mean, worst_max, bytes_in / 1024, bytes_out / 1024,
+                times.empty() ? 0 : times[times.size() / 2], times.empty() ? 0 : times.back());
+        // The pictures: the six furthest off, read back from the files saved above.
+        std::sort(by_error.rbegin(), by_error.rend());
+        std::vector<Sample> samples;
+        for (auto& [off, e] : by_error) {
+            if (samples.size() >= 6) break;
+            Sample s;
+            Bytes one;
+            std::wstring err, base = dir + L"\\" + widen(e->id);
+            if (decode_gif(read_file(base + L"-2x.gif"), DISCORD_EMOTE_SIZE, 0, 16384, s.want) &&
+                decode_gif(read_file(base + L".gif"), 0, 0, 16384, s.got) &&
+                decode_gif(read_file(base + L"-2x.gif"), 0, 0, 16384, s.two) &&
+                fetch(L"https://cdn.7tv.app/emote/" + widen(e->id) + L"/1x.gif", "", one, err) &&
+                decode_gif(one, 0, 0, 16384, s.one)) {
+                wprintf(L"  in the pictures: %ls (color off %.2f)\n", e->name.c_str(), off);
+                samples.push_back(std::move(s));
+            }
+        }
+        if (samples.empty()) return;
+
+        const uint32_t discord_bg = 0xFF313338, outline = 0xFF4E5058;
+        // Zoomed in 4x, frames 0 and the middle one: scaled (soft edges), then as written.
+        int zoom = 4, cell_w = 0, cell_h = zoom * DISCORD_EMOTE_SIZE, gap = 8;
+        for (auto& s : samples) cell_w = std::max(cell_w, zoom * s.got.w);
+        int zw = 4 * (cell_w + gap) + gap, zh = (int)samples.size() * (cell_h + gap) + gap;
+        std::vector<uint32_t> z((size_t)zw * zh, discord_bg);
+        for (int r = 0; r < (int)samples.size(); r++) {
+            auto& s = samples[r];
+            int x = gap, y = gap + r * (cell_h + gap);
+            for (int f : {0, s.got.count / 2})
+                for (const Animation* a : {&s.want, &s.got}) {
+                    paint(z, zw, x, y, scaled(frame_of(*a, f), a->w, a->h, zoom * a->w, zoom * a->h,
+                                              WICBitmapInterpolationModeNearestNeighbor),
+                          zoom * a->w, zoom * a->h);
+                    x += cell_w + gap;
+                }
+        }
+        bool z_ok = save_picture(out + L"\\12a-auto-zoomed.png", z, zw, zh);
+        // As Discord shows them at 175%: a box the size of Discord's own emotes (48px there is
+        // 84 here), then 1x, auto and 2x, standing on one line.
+        double k = 1.75;
+        auto at_k = [&](int v) { return (int)std::lround(v * k); };
+        int box = at_k(DISCORD_EMOTE_SIZE), row_h = at_k(64) + 2 * gap, dw = 1200, dh = (int)samples.size() * row_h + gap;
+        std::vector<uint32_t> d((size_t)dw * dh, discord_bg);
+        for (int r = 0; r < (int)samples.size(); r++) {
+            auto& s = samples[r];
+            int base = gap + r * row_h + at_k(64), x = gap;
+            for (int i = 0; i < box; i++) {  // the outline
+                d[(size_t)(base - box) * dw + x + i] = d[(size_t)(base - 1) * dw + x + i] = outline;
+                d[(size_t)(base - box + i) * dw + x] = d[(size_t)(base - box + i) * dw + x + box - 1] = outline;
+            }
+            x += box + 3 * gap;
+            for (const Animation* a : {&s.one, &s.got, &s.two}) {
+                int w = at_k(a->w), h = at_k(a->h);
+                paint(d, dw, x, base - h, scaled(frame_of(*a, 0), a->w, a->h, w, h, WICBitmapInterpolationModeCubic), w, h);
+                x += w + 3 * gap;
+            }
+        }
+        bool d_ok = save_picture(out + L"\\12b-auto-as-discord-shows.png", d, dw, dh);
+        wprintf(L"  12a-auto-zoomed         %ls (frame 0 and the middle one: scaled, then as written, 4x)\n",
+                z_ok ? L"saved" : L"FAILED");
+        wprintf(L"  12b-auto-as-discord-shows %ls (Discord's emote size, then 1x, auto, 2x, at 175%%)\n",
+                d_ok ? L"saved" : L"FAILED");
     }
 
     // Downloads previews straight through fetch() from 12 threads, to time the network alone.
@@ -829,6 +1095,7 @@ int wmain(int argc, wchar_t** argv) {
         return 1;
     }
     Tester t{*app, argv[1]};
+    t.own_uploads();
     bool clip = false, net = false;
     int gifs = 0, soak = 0;
     double cpu_s = 0;
@@ -848,6 +1115,13 @@ int wmain(int argc, wchar_t** argv) {
     for (int i = 2; i + 1 < argc; i++)
         if (std::wstring(argv[i]) == L"--file-speed") {
             t.file_speed(_wtoi(argv[i + 1]));
+            fflush(stdout);
+            ExitProcess(0);
+        }
+    for (int i = 2; i + 1 < argc; i++)
+        if (std::wstring(argv[i]) == L"--auto-size") {  // file mode's "auto" size alone
+            t.wait_search();
+            t.resize_check(_wtoi(argv[i + 1]));
             fflush(stdout);
             ExitProcess(0);
         }
