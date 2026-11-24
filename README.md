@@ -1,6 +1,6 @@
 # 7TV Emote Picker
 
-A small panel docked to the bottom-right of Discord's window, just above the message box. It only shows while Discord (or the picker) is in front. Type to search [7TV](https://7tv.app) emotes and click one to paste it into Discord: either its link or, with the gear button set to *file*, the emote file itself, which Discord uploads with your message. Whatever you had copied before goes back on the clipboard right after.
+A small panel docked to the bottom-right of Discord's window, just above the message box. It only shows while Discord (or the picker) is in front. Type to search [7TV](https://7tv.app) emotes and click one to paste it into Discord: either its link or, with the gear button set to *file*, the emote file itself, which Discord uploads with your message. Whatever you had copied before goes back on the clipboard right after. The X shrinks the panel to a small button in the same corner of Discord; click it to open the panel again, or right-click it (or the X) to quit.
 
 Discord shows an uploaded picture at its size in pixels, so 7TV's sizes come out smaller (1x, 32px) or bigger (2x, 64px) than Discord's own emotes (48px). With the size set to *auto*, file mode resizes gif and png files to 48px tall to match (`DISCORD_EMOTE_SIZE` in `src/config.h`).
 

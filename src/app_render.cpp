@@ -175,6 +175,7 @@ void App::make_fonts() {
     glyph_search = icons ? L"" : L"⌕";
     glyph_gear = icons ? L"" : L"⚙";
     glyph_close = icons ? L"" : L"✕";
+    glyph_emoji = icons ? L"" : L"☺";
     auto make = [&](const std::wstring& family, double size, DWRITE_TEXT_ALIGNMENT align) {
         ComPtr<IDWriteTextFormat> f;
         dwrite->CreateTextFormat(family.c_str(), nullptr, DWRITE_FONT_WEIGHT_NORMAL,
@@ -191,6 +192,7 @@ void App::make_fonts() {
     f_small_center = make(text_family, 12, DWRITE_TEXT_ALIGNMENT_CENTER);
     f_status = make(text_family, 12, DWRITE_TEXT_ALIGNMENT_LEADING);
     f_icon = make(icons ? icon_family : text_family, 14, DWRITE_TEXT_ALIGNMENT_CENTER);
+    f_button = make(icons ? icon_family : text_family, 20, DWRITE_TEXT_ALIGNMENT_CENTER);
     ComPtr<IDWriteInlineObject> ellipsis;  // long emote names end in "…"
     DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
     if (SUCCEEDED(dwrite->CreateEllipsisTrimmingSign(f_status.Get(), &ellipsis)))
@@ -235,11 +237,15 @@ void App::render() {
     dc->BeginDraw();
     dc->SetTransform(D2D1::Matrix3x2F::Identity());
     dc->Clear(color(BG));
-    draw_header();
-    draw_settings();
     double next_due = INFINITY;
-    draw_grid(now, next_due);
-    draw_status();
+    if (settings.collapsed) {
+        draw_button();
+    } else {
+        draw_header();
+        draw_settings();
+        draw_grid(now, next_due);
+        draw_status();
+    }
     HRESULT hr = dc->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
         discard_device();
@@ -462,6 +468,15 @@ void App::draw_status() {
     else if (flashing) s = &flash_text, c = TEXT;
     else if (hover_i >= 0 && hover_i < (int)emotes.size()) s = &emotes[hover_i].name, c = TEXT;
     text(*s, f_status.Get(), {(float)px(12), status.t + (float)px(4), win_w - (float)px(12), status.b - (float)px(7)}, c);
+}
+
+// Shrunk to a button (the X): a smiley that lights up under the mouse. The window's own
+// rounded corners round the button off.
+void App::draw_button() {
+    Box b{0, 0, (float)win_w, (float)win_h};
+    bool lit = hot == Hot::Button;
+    if (lit) fill_round(b, (float)px(8), HOVER);
+    text(glyph_emoji, f_button.Get(), b, lit ? TEXT : MUTED);
 }
 
 // Saves what was last drawn as a PNG (for tests).

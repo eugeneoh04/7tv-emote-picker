@@ -133,6 +133,7 @@ Box App::thumb_box() const {
 
 App::Hot App::hit(float x, float y, int* segment) const {
     if (segment) *segment = -1;
+    if (settings.collapsed) return x >= 0 && y >= 0 && x < win_w && y < win_h ? Hot::Button : Hot::None;
     for (int i = 0; i < (int)segments.size(); i++)
         if (segments[i].box.contains(x, y)) {
             if (segment) *segment = i;
@@ -169,6 +170,7 @@ LPCWSTR App::cursor_at(float x, float y) const {
         case Hot::Grip: return IDC_SIZENWSE;
         case Hot::Gear:
         case Hot::Close:
+        case Hot::Button:
         case Hot::Slider:
         case Hot::Segment: return IDC_HAND;
         case Hot::Field: return IDC_IBEAM;
@@ -215,7 +217,7 @@ void App::mouse_move(float x, float y) {
         hot_segment = seg;
         request_frame();
     }
-    hover_at(x, y);
+    if (!settings.collapsed) hover_at(x, y);
 }
 
 void App::mouse_down(float x, float y, bool shift, bool double_click) {
@@ -248,8 +250,11 @@ void App::mouse_down(float x, float y, bool shift, bool double_click) {
         case Hot::Gear:
             toggle_settings();
             break;
-        case Hot::Close:
-            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        case Hot::Close:  // shrinks to a button; the picker quits from its right-click menu
+            collapse(true);
+            break;
+        case Hot::Button:
+            collapse(false);
             break;
         case Hot::Field: {
             // The panel never comes to the front by itself (WS_EX_NOACTIVATE), so typing in the
@@ -288,6 +293,9 @@ void App::mouse_down(float x, float y, bool shift, bool double_click) {
             break;
         }
         case Hot::Grid:
+            // A double-click on the button would land its second click on whatever emote opened
+            // up under the mouse, and paste it.
+            if (now_ms() - opened_at < GetDoubleClickTime()) break;
             if (int i = cell_at(x, y); i >= 0) paste(i);
             break;
         default:
@@ -333,6 +341,7 @@ void App::mouse_leave() {
 }
 
 void App::wheel(int delta) {
+    if (settings.collapsed) return;
     if (mouse_inside && hit(mouse_x, mouse_y) == Hot::Slider) {  // over the size slider: 10% a notch
         set_emote_scale(settings.scale + (delta > 0 ? 2 : -2) * EMOTE_SCALE_STEP);
         save_settings(settings);
@@ -413,6 +422,7 @@ void App::view_changed() {
 // ---- the search box -----------------------------------------------------------------------
 
 void App::key_down(UINT vk) {
+    if (settings.collapsed) return;
     bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0;
     auto copy = [&] {
         if (box.has_selection()) clipboard_set(hwnd, clipboard_text(box.selected()), false);
@@ -449,7 +459,7 @@ void App::key_down(UINT vk) {
 }
 
 void App::char_typed(wchar_t c) {
-    if (c >= 0x20 && c != 0x7F) text_edited(box.insert(std::wstring(1, c)));
+    if (!settings.collapsed && c >= 0x20 && c != 0x7F) text_edited(box.insert(std::wstring(1, c)));
 }
 
 void App::text_edited(bool changed) {
