@@ -2,6 +2,13 @@
 
 A small panel docked to the bottom-right of Discord's window, just above the message box. It only shows while Discord (or the picker) is in front. Type to search [7TV](https://7tv.app) emotes and click one to paste it into Discord: either its link or, with the gear button set to *file*, the emote file itself, which Discord uploads with your message. Whatever you had copied before goes back on the clipboard right after. The X shrinks the panel to a small button in the same corner of Discord; click it to open the panel again, or right-click it (or the X) to quit.
 
+<p>
+  <img src="docs/screenshots/search.png" width="340" alt="The picker after a search for panda: a grid of emotes, with the one under the mouse lit up and its name at the bottom">
+  <img src="docs/screenshots/settings.png" width="340" alt="The picker with the gear button's settings open: link or file, the size, the format, and the emote size slider">
+</p>
+
+A search for *panda*, with the mouse on an emote (its name shows at the bottom), and the gear button's settings: link or file, the size and format to paste, and how big the emotes show.
+
 Discord shows an uploaded picture at its size in pixels, so 7TV's sizes come out smaller (1x, 32px) or bigger (2x, 64px) than Discord's own emotes (48px). With the size set to *auto*, file mode resizes gif and png files to 48px tall to match (`DISCORD_EMOTE_SIZE` in `src/config.h`).
 
 Windows only: C++20 on Win32, Direct2D, DirectWrite, WIC and WinHTTP. The previews are 7TV's WebP files, read with Google's libwebp decoder, included in `third_party/libwebp` (BSD license) and built by `build.cmd`.
